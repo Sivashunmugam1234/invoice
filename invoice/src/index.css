@@ -1,21 +1,9 @@
 :root {
-  --bg: #f5ede2;
-  --bg-deep: #eadbc6;
-  --surface: #fffaf3;
-  --text: #173126;
-  --muted: #5f675f;
-  --accent: #b45628;
-  --accent-soft: rgba(180, 86, 40, 0.12);
-  --heading: Georgia, 'Times New Roman', serif;
-  --body: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-
-  font-family: var(--body);
+  font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
   line-height: 1.5;
   font-weight: 400;
-  color: var(--text);
-  background:
-    radial-gradient(circle at top left, rgba(255, 255, 255, 0.75), transparent 28%),
-    linear-gradient(180deg, var(--bg), var(--bg-deep));
+  color: #111827;
+  background: #f3f4f6;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
@@ -26,52 +14,16 @@
   box-sizing: border-box;
 }
 
-html {
-  min-height: 100%;
-}
-
 body {
   margin: 0;
-  min-height: 100vh;
-}
-
-body::before {
-  content: '';
-  position: fixed;
-  inset: 0;
-  pointer-events: none;
-  background-image:
-    linear-gradient(rgba(255, 255, 255, 0.18) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(255, 255, 255, 0.18) 1px, transparent 1px);
-  background-size: 28px 28px;
-  mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.35), transparent 85%);
-}
-
-a {
-  color: inherit;
 }
 
 button,
-input,
-textarea,
-select {
+input {
   font: inherit;
 }
 
 #root {
-  width: min(1180px, calc(100% - 32px));
+  width: min(760px, calc(100% - 32px));
   margin: 32px auto;
-}
-
-h1,
-h2 {
-  font-family: var(--heading);
-  color: var(--text);
-}
-
-@media (max-width: 960px) {
-  #root {
-    width: min(100%, calc(100% - 20px));
-    margin: 10px auto;
-  }
 }
