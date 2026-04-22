@@ -1,25 +1,47 @@
-.upload-page {
+.dashboard {
   display: grid;
-  gap: 16px;
+  gap: 24px;
 }
 
-.upload-card,
-.list-card {
-  background: #ffffff;
-  border: 1px solid #d9dde3;
-  border-radius: 12px;
+.top-bar,
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 14px;
   padding: 24px;
+  box-shadow: 0 18px 40px rgba(150, 130, 118, 0.08);
+}
+
+.dashboard-grid {
+  display: grid;
+  gap: 24px;
+  grid-template-columns: minmax(280px, 320px) minmax(320px, 380px) minmax(480px, 1fr);
+  align-items: start;
+}
+
+.eyebrow {
+  margin: 0 0 8px;
+  font-size: 0.78rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--stone);
 }
 
 h1,
 h2 {
-  margin: 0 0 12px;
+  margin: 0;
+  color: var(--text);
 }
 
 .subtitle,
 .helper,
-.invoice-list small {
-  color: #5f6b7a;
+.invoice-item small,
+.empty-state {
+  color: var(--stone);
+}
+
+.top-bar h1 {
+  margin-bottom: 10px;
 }
 
 .upload-form {
@@ -33,18 +55,25 @@ h2 {
 }
 
 .upload-form input[type='file'] {
-  border: 1px solid #c6ccd5;
-  border-radius: 8px;
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 10px;
   padding: 12px;
-  background: #f8fafc;
+  background: var(--surface);
+}
+
+.upload-form button,
+.open-link,
+.invoice-item {
+  font: inherit;
 }
 
 .upload-form button {
   width: fit-content;
   border: 0;
-  border-radius: 8px;
-  background: #0f172a;
-  color: #ffffff;
+  border-radius: 10px;
+  background: var(--stone);
+  color: var(--paper);
   padding: 10px 16px;
   cursor: pointer;
 }
@@ -58,50 +87,143 @@ h2 {
 .error {
   margin: 12px 0 0;
   padding: 12px;
-  border-radius: 8px;
+  border-radius: 10px;
 }
 
 .success {
-  background: #ecfdf3;
-  color: #166534;
+  background: rgba(150, 130, 118, 0.12);
+  color: #6e5b50;
 }
 
 .error {
-  background: #fef2f2;
-  color: #b91c1c;
+  background: rgba(200, 182, 169, 0.35);
+  color: #7d4b3e;
+}
+
+.section-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: start;
+  margin-bottom: 16px;
+}
+
+.badge {
+  min-width: 34px;
+  height: 34px;
+  border-radius: 999px;
+  display: inline-grid;
+  place-items: center;
+  background: var(--clay);
+  color: var(--text);
+  font-weight: 700;
 }
 
 .invoice-list {
   list-style: none;
-  margin: 16px 0 0;
+  margin: 0;
   padding: 0;
+  display: grid;
+  gap: 10px;
 }
 
-.invoice-list li {
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 12px 0;
-  border-top: 1px solid #e5e7eb;
+.invoice-item {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  text-align: left;
+  padding: 14px;
+  cursor: pointer;
+  display: grid;
+  gap: 6px;
 }
 
-.invoice-list li:first-child {
-  border-top: 0;
-  padding-top: 0;
+.invoice-item-active {
+  border-color: var(--stone);
+  background: rgba(200, 182, 169, 0.26);
 }
 
-.invoice-list span,
-.invoice-list small {
-  display: block;
+.invoice-item:hover {
+  border-color: var(--stone);
+}
+
+.invoice-name {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.list-panel {
+  min-height: 306px;
+}
+
+.preview-panel {
+  min-height: 640px;
+}
+
+.preview-surface {
+  height: 560px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  overflow: hidden;
+  display: grid;
+  place-items: center;
+}
+
+.document-frame,
+.document-image {
+  width: 100%;
+  height: 100%;
+  border: 0;
+}
+
+.document-image {
+  object-fit: contain;
+  background: var(--paper);
+}
+
+.open-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  white-space: nowrap;
+  text-decoration: none;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 9px 12px;
+  background: rgba(223, 212, 203, 0.35);
+}
+
+.empty-state {
+  margin: 0;
+  padding: 24px;
+}
+
+@media (max-width: 1100px) {
+  .dashboard-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .list-panel,
+  .preview-panel {
+    min-height: 0;
+  }
 }
 
 @media (max-width: 640px) {
-  .upload-card,
-  .list-card {
+  .top-bar,
+  .panel {
     padding: 16px;
   }
 
-  .invoice-list li {
+  .section-header {
     flex-direction: column;
+    align-items: stretch;
+  }
+
+  .preview-surface {
+    height: 420px;
   }
 }

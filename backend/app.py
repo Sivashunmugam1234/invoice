@@ -1,8 +1,9 @@
 from datetime import datetime
+import mimetypes
 from pathlib import Path
 from uuid import uuid4
 
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, send_file
 from flask_cors import CORS
 from dotenv import load_dotenv
 from werkzeug.utils import secure_filename
@@ -39,25 +40,40 @@ def allowed_file(filename):
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
 
 
+def serialize_invoice(file_path):
+    stats = file_path.stat()
+    mime_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
+
+    return {
+        "id": file_path.stem,
+        "filename": file_path.name,
+        "originalName": file_path.name.split("_", 2)[-1],
+        "size": stats.st_size,
+        "uploadedAt": datetime.fromtimestamp(stats.st_mtime).isoformat(),
+        "mimeType": mime_type,
+        "previewUrl": f"/api/invoices/{file_path.stem}/file",
+    }
+
+
+def uploaded_invoice_files():
+    files = [
+        file_path
+        for file_path in UPLOAD_FOLDER.iterdir()
+        if file_path.is_file() and file_path.name != ".gitkeep"
+    ]
+    return sorted(files, key=lambda file_path: file_path.stat().st_mtime, reverse=True)
+
+
 def list_uploaded_invoices():
-    invoices = []
+    return [serialize_invoice(file_path) for file_path in uploaded_invoice_files()]
 
-    for file_path in sorted(UPLOAD_FOLDER.iterdir(), reverse=True):
-        if not file_path.is_file() or file_path.name == ".gitkeep":
-            continue
 
-        stats = file_path.stat()
-        invoices.append(
-            {
-                "id": file_path.stem,
-                "filename": file_path.name,
-                "originalName": file_path.name.split("_", 2)[-1],
-                "size": stats.st_size,
-                "uploadedAt": datetime.fromtimestamp(stats.st_mtime).isoformat(),
-            }
-        )
+def find_invoice_file(invoice_id):
+    for file_path in uploaded_invoice_files():
+        if file_path.stem == invoice_id:
+            return file_path
 
-    return invoices
+    return None
 
 
 @app.route('/api/health', methods=['GET'])
@@ -67,6 +83,26 @@ def health():
 @app.route('/api/invoices', methods=['GET'])
 def get_invoices():
     return jsonify({"invoices": list_uploaded_invoices()}), 200
+
+
+@app.route('/api/invoices/<invoice_id>', methods=['GET'])
+def get_invoice(invoice_id):
+    file_path = find_invoice_file(invoice_id)
+
+    if file_path is None:
+        return jsonify({"error": "Invoice not found."}), 404
+
+    return jsonify({"invoice": serialize_invoice(file_path)}), 200
+
+
+@app.route('/api/invoices/<invoice_id>/file', methods=['GET'])
+def serve_invoice_file(invoice_id):
+    file_path = find_invoice_file(invoice_id)
+
+    if file_path is None:
+        return jsonify({"error": "Invoice not found."}), 404
+
+    return send_file(file_path, as_attachment=False)
 
 
 @app.route('/api/invoices', methods=['POST'])
@@ -93,13 +129,7 @@ def upload_invoice():
     return jsonify(
         {
             "message": "Invoice uploaded successfully.",
-            "invoice": {
-                "id": target_path.stem,
-                "filename": target_path.name,
-                "originalName": safe_name,
-                "size": target_path.stat().st_size,
-                "uploadedAt": datetime.now().isoformat(),
-            },
+            "invoice": serialize_invoice(target_path),
         }
     ), 201
 

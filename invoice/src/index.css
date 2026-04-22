@@ -2,8 +2,16 @@
   font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
   line-height: 1.5;
   font-weight: 400;
-  color: #111827;
-  background: #f3f4f6;
+  color: #4f433d;
+  background: #f8f7f5;
+  --stone: #968276;
+  --paper: #f8f7f5;
+  --sand: #dfd4cb;
+  --clay: #c8b6a9;
+  --text: #4f433d;
+  --panel: #fbfaf8;
+  --border: #d7cbc1;
+  --surface: #f1ebe6;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
@@ -16,6 +24,9 @@
 
 body {
   margin: 0;
+  background:
+    linear-gradient(180deg, rgba(200, 182, 169, 0.22), rgba(248, 247, 245, 0.95)),
+    var(--paper);
 }
 
 button,
@@ -24,6 +35,6 @@ input {
 }
 
 #root {
-  width: min(760px, calc(100% - 32px));
-  margin: 32px auto;
+  width: min(1320px, calc(100% - 40px));
+  margin: 32px auto 40px;
 }
