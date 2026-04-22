@@ -18,6 +18,8 @@ backend/ENV/
 backend/build/
 backend/dist/
 backend/*.egg-info/
+backend/uploads/*
+!backend/uploads/.gitkeep
 
 # Environment files
 backend/.env
