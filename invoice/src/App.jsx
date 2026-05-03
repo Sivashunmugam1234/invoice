@@ -2,21 +2,25 @@ import { useEffect, useState } from 'react'
 import './App.css'
 
 function formatSize(bytes) {
-  if (bytes < 1024) {
-    return `${bytes} B`
-  }
-
+  if (bytes < 1024) return `${bytes} B`
   const kb = bytes / 1024
-
-  if (kb < 1024) {
-    return `${kb.toFixed(1)} KB`
-  }
-
+  if (kb < 1024) return `${kb.toFixed(1)} KB`
   return `${(kb / 1024).toFixed(1)} MB`
 }
 
 function formatDate(value) {
   return new Date(value).toLocaleString()
+}
+
+const FIELD_LABELS = {
+  invoice_number: 'Invoice Number',
+  date: 'Invoice Date',
+  due_date: 'Due Date',
+  vendor: 'Vendor',
+  bill_to: 'Bill To',
+  subtotal: 'Subtotal',
+  tax: 'Tax / VAT',
+  total: 'Total Amount',
 }
 
 function App() {
@@ -27,6 +31,9 @@ function App() {
   const [error, setError] = useState('')
   const [isLoading, setIsLoading] = useState(true)
   const [isUploading, setIsUploading] = useState(false)
+  const [extractedFields, setExtractedFields] = useState(null)
+  const [isExtracting, setIsExtracting] = useState(false)
+  const [extractError, setExtractError] = useState('')
 
   const activeInvoice =
     invoices.find((invoice) => invoice.id === activeInvoiceId) ?? invoices[0] ?? null
@@ -112,6 +119,25 @@ function App() {
     }
   }
 
+  async function handleExtract() {
+    if (!activeInvoice) return
+    setIsExtracting(true)
+    setExtractedFields(null)
+    setExtractError('')
+    try {
+      const response = await fetch(`/api/invoices/${activeInvoice.id}/extract`, {
+        method: 'POST',
+      })
+      const data = await response.json()
+      if (!response.ok) throw new Error(data.error || 'Extraction failed.')
+      setExtractedFields(data.fields)
+    } catch (err) {
+      setExtractError(err.message)
+    } finally {
+      setIsExtracting(false)
+    }
+  }
+
   function renderPreview() {
     if (!activeInvoice) {
       return <p className="empty-state">Upload an invoice to preview it here.</p>
@@ -149,8 +175,8 @@ function App() {
           <p className="eyebrow">OCR Dashboard</p>
           <h1>Upload and inspect invoices</h1>
           <p className="subtitle">
-            This keeps the first OCR step simple: upload files, store them in the
-            backend, and review each uploaded document before extraction.
+            Upload a PDF or image invoice, then click <strong>Extract fields</strong> to
+            run OCR and pull out key invoice data automatically.
           </p>
         </div>
       </section>
@@ -208,7 +234,11 @@ function App() {
                         ? 'invoice-item invoice-item-active'
                         : 'invoice-item'
                     }
-                    onClick={() => setActiveInvoiceId(invoice.id)}
+                    onClick={() => {
+                      setActiveInvoiceId(invoice.id)
+                      setExtractedFields(null)
+                      setExtractError('')
+                    }}
                   >
                     <span className="invoice-name">{invoice.originalName}</span>
                     <small>
@@ -231,20 +261,83 @@ function App() {
                 </p>
               ) : null}
             </div>
-            {activeInvoice ? (
-              <a
-                className="open-link"
-                href={activeInvoice.previewUrl}
-                target="_blank"
-                rel="noreferrer"
-              >
-                Open file
-              </a>
-            ) : null}
+            <div className="preview-actions">
+              {activeInvoice ? (
+                <>
+                  <button
+                    type="button"
+                    className="extract-btn"
+                    onClick={handleExtract}
+                    disabled={isExtracting}
+                  >
+                    {isExtracting ? 'Extracting...' : 'Extract fields'}
+                  </button>
+                  <a
+                    className="open-link"
+                    href={activeInvoice.previewUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    Open file
+                  </a>
+                </>
+              ) : null}
+            </div>
           </div>
 
           <div className="preview-surface">{renderPreview()}</div>
         </section>
+
+        {(extractedFields || extractError) && (
+          <section className="panel fields-panel">
+            <h2>Extracted fields</h2>
+            {extractError ? (
+              <p className="error">{extractError}</p>
+            ) : (
+              <>
+                <dl className="fields-grid">
+                  {Object.entries(FIELD_LABELS).map(([key, label]) =>
+                    extractedFields[key] ? (
+                      <div key={key} className="field-row">
+                        <dt>{label}</dt>
+                        <dd>{extractedFields[key]}</dd>
+                      </div>
+                    ) : null
+                  )}
+                </dl>
+                
+                {extractedFields.items && extractedFields.items.length > 0 && (
+                  <div className="items-section">
+                    <h3>Extracted Line Items</h3>
+                    <table className="items-table">
+                      <thead>
+                        <tr>
+                          <th>Description</th>
+                          <th>Extracted Values</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {extractedFields.items.map((item, index) => (
+                          <tr key={index}>
+                            <td>{item.description}</td>
+                            <td>{item.extracted_numbers.join(', ')}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+
+                {extractedFields.raw_text && (
+                  <details className="raw-text-details">
+                    <summary>Raw extracted text</summary>
+                    <pre className="raw-text">{extractedFields.raw_text}</pre>
+                  </details>
+                )}
+              </>
+            )}
+          </section>
+        )}
       </section>
     </main>
   )
