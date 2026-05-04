@@ -1,7 +1,6 @@
 from datetime import datetime
 import mimetypes
 import re
-import sqlite3
 from pathlib import Path
 from uuid import uuid4
 
@@ -10,6 +9,8 @@ from flask_cors import CORS
 from dotenv import load_dotenv
 from werkzeug.utils import secure_filename
 import os
+import pymysql
+import pymysql.cursors
 import pdfplumber
 import pytesseract
 from PIL import Image
@@ -28,8 +29,25 @@ app = Flask(__name__)
 
 BASE_DIR = Path(__file__).resolve().parent
 UPLOAD_FOLDER = BASE_DIR / "uploads"
-DB_PATH = BASE_DIR / "invoices.db"
 ALLOWED_EXTENSIONS = {"pdf", "png", "jpg", "jpeg"}
+
+# ── MySQL connection config (read from .env) ──────────────────────────────────
+# Add these to your .env file:
+#   DB_HOST=localhost
+#   DB_PORT=3306
+#   DB_USER=root
+#   DB_PASSWORD=yourpassword
+#   DB_NAME=invoices_db
+
+DB_CONFIG = {
+    "host":     os.getenv("DB_HOST", "localhost"),
+    "port":     int(os.getenv("DB_PORT", 3306)),
+    "user":     os.getenv("DB_USER", "root"),
+    "password": os.getenv("DB_PASSWORD", ""),
+    "database": os.getenv("DB_NAME", "invoices_db"),
+    "cursorclass": pymysql.cursors.DictCursor,
+    "autocommit": False,
+}
 
 UPLOAD_FOLDER.mkdir(exist_ok=True)
 
@@ -48,73 +66,82 @@ CORS(
     },
 )
 
-# ── Phase 7: Database Schema ─────────────────────────────────────────────────
+# ── Phase 7: MySQL Database Schema ───────────────────────────────────────────
+# Run init_db() once on startup — creates all tables if they don't exist.
 
-SCHEMA_SQL = """
-CREATE TABLE IF NOT EXISTS invoices (
-    id              TEXT PRIMARY KEY,
-    filename        TEXT NOT NULL,
-    original_name   TEXT NOT NULL,
-    mime_type       TEXT NOT NULL,
-    file_size       INTEGER NOT NULL,
-    uploaded_at     TEXT NOT NULL,
-    status          TEXT NOT NULL DEFAULT 'uploaded'
-    -- status values: uploaded | extracting | extracted | validating | validated | stored | failed
-);
-
-CREATE TABLE IF NOT EXISTS invoice_fields (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    invoice_id      TEXT NOT NULL REFERENCES invoices(id) ON DELETE CASCADE,
-    invoice_number  TEXT,
-    invoice_date    TEXT,
-    due_date        TEXT,
-    vendor          TEXT,
-    bill_to         TEXT,
-    subtotal        REAL,
-    tax             REAL,
-    total           REAL,
-    raw_text        TEXT,
-    extracted_at    TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS invoice_line_items (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    invoice_id      TEXT NOT NULL REFERENCES invoices(id) ON DELETE CASCADE,
-    description     TEXT NOT NULL,
-    quantity        REAL,
-    unit_price      REAL,
-    amount          REAL
-);
-
-CREATE TABLE IF NOT EXISTS invoice_validation (
-    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
-    invoice_id              TEXT NOT NULL REFERENCES invoices(id) ON DELETE CASCADE,
-    is_valid                INTEGER NOT NULL DEFAULT 0,
-    date_format_ok          INTEGER NOT NULL DEFAULT 0,
-    amount_consistency_ok   INTEGER NOT NULL DEFAULT 0,
-    gst_calculation_ok      INTEGER NOT NULL DEFAULT 0,
-    total_match_ok          INTEGER NOT NULL DEFAULT 0,
-    errors                  TEXT,
-    validated_at            TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS workflow_log (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    invoice_id  TEXT NOT NULL REFERENCES invoices(id) ON DELETE CASCADE,
-    step        TEXT NOT NULL,
-    status      TEXT NOT NULL,
-    message     TEXT,
-    created_at  TEXT NOT NULL
-);
-"""
+SCHEMA_STATEMENTS = [
+    """
+    CREATE TABLE IF NOT EXISTS invoices (
+        id            VARCHAR(255)  PRIMARY KEY,
+        filename      VARCHAR(500)  NOT NULL,
+        original_name VARCHAR(500)  NOT NULL,
+        mime_type     VARCHAR(100)  NOT NULL,
+        file_size     BIGINT        NOT NULL,
+        uploaded_at   DATETIME      NOT NULL,
+        status        VARCHAR(50)   NOT NULL DEFAULT 'uploaded'
+        -- status values: uploaded | extracting | extracted | validating | validated | stored | failed
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS invoice_fields (
+        id              INT           PRIMARY KEY AUTO_INCREMENT,
+        invoice_id      VARCHAR(255)  NOT NULL,
+        invoice_number  VARCHAR(100),
+        invoice_date    VARCHAR(100),
+        due_date        VARCHAR(100),
+        vendor          VARCHAR(255),
+        bill_to         VARCHAR(255),
+        subtotal        DECIMAL(15,2),
+        tax             DECIMAL(15,2),
+        total           DECIMAL(15,2),
+        raw_text        LONGTEXT,
+        extracted_at    DATETIME      NOT NULL,
+        FOREIGN KEY (invoice_id) REFERENCES invoices(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS invoice_line_items (
+        id           INT           PRIMARY KEY AUTO_INCREMENT,
+        invoice_id   VARCHAR(255)  NOT NULL,
+        description  TEXT          NOT NULL,
+        quantity     DECIMAL(15,4),
+        unit_price   DECIMAL(15,2),
+        amount       DECIMAL(15,2),
+        FOREIGN KEY (invoice_id) REFERENCES invoices(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS invoice_validation (
+        id                    INT           PRIMARY KEY AUTO_INCREMENT,
+        invoice_id            VARCHAR(255)  NOT NULL,
+        is_valid              TINYINT(1)    NOT NULL DEFAULT 0,
+        date_format_ok        TINYINT(1)    NOT NULL DEFAULT 0,
+        amount_consistency_ok TINYINT(1)    NOT NULL DEFAULT 0,
+        gst_calculation_ok    TINYINT(1)    NOT NULL DEFAULT 0,
+        total_match_ok        TINYINT(1)    NOT NULL DEFAULT 0,
+        errors                TEXT,
+        validated_at          DATETIME      NOT NULL,
+        FOREIGN KEY (invoice_id) REFERENCES invoices(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS workflow_log (
+        id          INT           PRIMARY KEY AUTO_INCREMENT,
+        invoice_id  VARCHAR(255)  NOT NULL,
+        step        VARCHAR(100)  NOT NULL,
+        status      VARCHAR(100)  NOT NULL,
+        message     TEXT,
+        created_at  DATETIME      NOT NULL,
+        FOREIGN KEY (invoice_id) REFERENCES invoices(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    """,
+]
 
 
 def get_db():
-    """Get a SQLite connection, stored on Flask's g object for the request lifetime."""
+    """Return a per-request MySQL connection stored on Flask's g object."""
     if "db" not in g:
-        g.db = sqlite3.connect(str(DB_PATH), detect_types=sqlite3.PARSE_DECLTYPES)
-        g.db.row_factory = sqlite3.Row
-        g.db.execute("PRAGMA foreign_keys = ON")
+        g.db = pymysql.connect(**DB_CONFIG)
     return g.db
 
 
@@ -126,11 +153,18 @@ def close_db(exception=None):
 
 
 def init_db():
-    """Create tables on startup if they don't exist."""
-    con = sqlite3.connect(str(DB_PATH))
-    con.executescript(SCHEMA_SQL)
-    con.commit()
-    con.close()
+    """Create all tables in MySQL if they don't exist. Called once at startup."""
+    con = pymysql.connect(**DB_CONFIG)
+    try:
+        with con.cursor() as cur:
+            for statement in SCHEMA_STATEMENTS:
+                # Strip inline comments (MySQL doesn't allow -- inside CREATE TABLE strings)
+                clean = re.sub(r"--[^\n]*", "", statement).strip()
+                if clean:
+                    cur.execute(clean)
+        con.commit()
+    finally:
+        con.close()
 
 
 # ── File helpers ─────────────────────────────────────────────────────────────
@@ -175,11 +209,12 @@ def find_invoice_file(invoice_id):
 # ── Phase 6: Workflow log helper ─────────────────────────────────────────────
 
 def log_workflow(db, invoice_id: str, step: str, status: str, message: str = ""):
-    db.execute(
-        "INSERT INTO workflow_log (invoice_id, step, status, message, created_at) VALUES (?,?,?,?,?)",
-        (invoice_id, step, status, message, datetime.utcnow().isoformat()),
-    )
-    db.execute("UPDATE invoices SET status = ? WHERE id = ?", (status, invoice_id))
+    with db.cursor() as cur:
+        cur.execute(
+            "INSERT INTO workflow_log (invoice_id, step, status, message, created_at) VALUES (%s,%s,%s,%s,%s)",
+            (invoice_id, step, status, message, datetime.utcnow()),
+        )
+        cur.execute("UPDATE invoices SET status = %s WHERE id = %s", (status, invoice_id))
     db.commit()
 
 
@@ -498,75 +533,74 @@ def run_workflow(invoice_id: str, file_path: Path, db) -> dict:
     # STEP 3 – Store into DB
     log_workflow(db, invoice_id, "store", "storing", "Persisting fields to database.")
     try:
-        now = datetime.utcnow().isoformat()
-
-        # Upsert invoice record (may already exist from upload step)
-        db.execute("""
-            INSERT INTO invoices (id, filename, original_name, mime_type, file_size, uploaded_at, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET status = excluded.status
-        """, (
-            invoice_id,
-            file_path.name,
-            file_path.name.split("_", 2)[-1],
-            mimetypes.guess_type(file_path.name)[0] or "application/octet-stream",
-            file_path.stat().st_size,
-            datetime.fromtimestamp(file_path.stat().st_mtime).isoformat(),
-            "stored",
-        ))
-
-        # Remove old extracted fields if re-extracting
-        db.execute("DELETE FROM invoice_fields WHERE invoice_id = ?", (invoice_id,))
-        db.execute("""
-            INSERT INTO invoice_fields
-              (invoice_id, invoice_number, invoice_date, due_date, vendor, bill_to,
-               subtotal, tax, total, raw_text, extracted_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            invoice_id,
-            fields.get("invoice_number"),
-            fields.get("date"),
-            fields.get("due_date"),
-            fields.get("vendor"),
-            fields.get("bill_to"),
-            fields.get("subtotal"),
-            fields.get("tax"),
-            fields.get("total"),
-            fields.get("raw_text", ""),
-            now,
-        ))
-
-        # Store line items
-        db.execute("DELETE FROM invoice_line_items WHERE invoice_id = ?", (invoice_id,))
-        for item in fields.get("items", []):
-            db.execute("""
-                INSERT INTO invoice_line_items (invoice_id, description, quantity, unit_price, amount)
-                VALUES (?, ?, ?, ?, ?)
+        now = datetime.utcnow()
+        with db.cursor() as cur:
+            # Upsert invoice record
+            cur.execute("""
+                INSERT INTO invoices (id, filename, original_name, mime_type, file_size, uploaded_at, status)
+                VALUES (%s, %s, %s, %s, %s, %s, 'stored')
+                ON DUPLICATE KEY UPDATE status = 'stored'
             """, (
                 invoice_id,
-                item.get("description", ""),
-                item.get("quantity"),
-                item.get("unit_price"),
-                item.get("amount"),
+                file_path.name,
+                file_path.name.split("_", 2)[-1],
+                mimetypes.guess_type(file_path.name)[0] or "application/octet-stream",
+                file_path.stat().st_size,
+                datetime.fromtimestamp(file_path.stat().st_mtime),
             ))
 
-        # Store validation result
-        db.execute("DELETE FROM invoice_validation WHERE invoice_id = ?", (invoice_id,))
-        db.execute("""
-            INSERT INTO invoice_validation
-              (invoice_id, is_valid, date_format_ok, amount_consistency_ok,
-               gst_calculation_ok, total_match_ok, errors, validated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            invoice_id,
-            int(validation["is_valid"]),
-            int(validation["date_format_ok"]),
-            int(validation["amount_consistency_ok"]),
-            int(validation["gst_calculation_ok"]),
-            int(validation["total_match_ok"]),
-            "; ".join(validation.get("errors", [])),
-            now,
-        ))
+            # Remove old extracted fields if re-extracting
+            cur.execute("DELETE FROM invoice_fields WHERE invoice_id = %s", (invoice_id,))
+            cur.execute("""
+                INSERT INTO invoice_fields
+                  (invoice_id, invoice_number, invoice_date, due_date, vendor, bill_to,
+                   subtotal, tax, total, raw_text, extracted_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """, (
+                invoice_id,
+                fields.get("invoice_number"),
+                fields.get("date"),
+                fields.get("due_date"),
+                fields.get("vendor"),
+                fields.get("bill_to"),
+                fields.get("subtotal"),
+                fields.get("tax"),
+                fields.get("total"),
+                fields.get("raw_text", ""),
+                now,
+            ))
+
+            # Store line items
+            cur.execute("DELETE FROM invoice_line_items WHERE invoice_id = %s", (invoice_id,))
+            for item in fields.get("items", []):
+                cur.execute("""
+                    INSERT INTO invoice_line_items (invoice_id, description, quantity, unit_price, amount)
+                    VALUES (%s, %s, %s, %s, %s)
+                """, (
+                    invoice_id,
+                    item.get("description", ""),
+                    item.get("quantity"),
+                    item.get("unit_price"),
+                    item.get("amount"),
+                ))
+
+            # Store validation result
+            cur.execute("DELETE FROM invoice_validation WHERE invoice_id = %s", (invoice_id,))
+            cur.execute("""
+                INSERT INTO invoice_validation
+                  (invoice_id, is_valid, date_format_ok, amount_consistency_ok,
+                   gst_calculation_ok, total_match_ok, errors, validated_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            """, (
+                invoice_id,
+                int(validation["is_valid"]),
+                int(validation["date_format_ok"]),
+                int(validation["amount_consistency_ok"]),
+                int(validation["gst_calculation_ok"]),
+                int(validation["total_match_ok"]),
+                "; ".join(validation.get("errors", [])),
+                now,
+            ))
 
         db.commit()
         log_workflow(db, invoice_id, "store", "stored", "All data persisted successfully.")
@@ -641,20 +675,20 @@ def upload_invoice():
 
     invoice_data = serialize_invoice(target_path)
 
-    # Register in DB with initial status
     db = get_db()
-    db.execute("""
-        INSERT OR IGNORE INTO invoices
-          (id, filename, original_name, mime_type, file_size, uploaded_at, status)
-        VALUES (?, ?, ?, ?, ?, ?, 'uploaded')
-    """, (
-        invoice_data["id"],
-        invoice_data["filename"],
-        invoice_data["originalName"],
-        invoice_data["mimeType"],
-        invoice_data["size"],
-        invoice_data["uploadedAt"],
-    ))
+    with db.cursor() as cur:
+        cur.execute("""
+            INSERT IGNORE INTO invoices
+              (id, filename, original_name, mime_type, file_size, uploaded_at, status)
+            VALUES (%s, %s, %s, %s, %s, %s, 'uploaded')
+        """, (
+            invoice_data["id"],
+            invoice_data["filename"],
+            invoice_data["originalName"],
+            invoice_data["mimeType"],
+            invoice_data["size"],
+            invoice_data["uploadedAt"],
+        ))
     db.commit()
 
     log_workflow(db, invoice_data["id"], "upload", "uploaded", "File uploaded successfully.")
@@ -685,24 +719,28 @@ def extract_invoice(invoice_id):
 def get_workflow_log(invoice_id):
     """Return the workflow history for an invoice."""
     db = get_db()
-    rows = db.execute(
-        "SELECT step, status, message, created_at FROM workflow_log WHERE invoice_id = ? ORDER BY id ASC",
-        (invoice_id,),
-    ).fetchall()
-    return jsonify({"log": [dict(r) for r in rows]}), 200
+    with db.cursor() as cur:
+        cur.execute(
+            "SELECT step, status, message, created_at FROM workflow_log WHERE invoice_id = %s ORDER BY id ASC",
+            (invoice_id,),
+        )
+        rows = cur.fetchall()
+    return jsonify({"log": rows}), 200
 
 
 @app.route("/api/invoices/<invoice_id>/validation", methods=["GET"])
 def get_validation(invoice_id):
     """Return the latest validation result for an invoice."""
     db = get_db()
-    row = db.execute(
-        "SELECT * FROM invoice_validation WHERE invoice_id = ? ORDER BY id DESC LIMIT 1",
-        (invoice_id,),
-    ).fetchone()
+    with db.cursor() as cur:
+        cur.execute(
+            "SELECT * FROM invoice_validation WHERE invoice_id = %s ORDER BY id DESC LIMIT 1",
+            (invoice_id,),
+        )
+        row = cur.fetchone()
     if not row:
         return jsonify({"error": "No validation record found."}), 404
-    return jsonify({"validation": dict(row)}), 200
+    return jsonify({"validation": row}), 200
 
 
 if __name__ == "__main__":

@@ -1,40 +1,66 @@
+@import url('https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Mono:wght@300;400;500&family=Instrument+Sans:wght@400;500;600&display=swap');
+
 :root {
-  font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-  line-height: 1.5;
-  font-weight: 400;
-  color: #4f433d;
-  background: #f8f7f5;
-  --stone: #968276;
-  --paper: #f8f7f5;
-  --sand: #dfd4cb;
-  --clay: #c8b6a9;
-  --text: #4f433d;
-  --panel: #fbfaf8;
-  --border: #d7cbc1;
-  --surface: #f1ebe6;
+  /* Core palette */
+  --bg:        #0e0e10;
+  --bg2:       #141416;
+  --bg3:       #1a1a1e;
+  --border:    rgba(255,255,255,0.07);
+  --border-hi: rgba(255,255,255,0.14);
+
+  /* Accent */
+  --gold:      #c9a84c;
+  --gold-dim:  rgba(201,168,76,0.15);
+  --gold-glow: rgba(201,168,76,0.25);
+
+  /* Text */
+  --text:      #f0ede8;
+  --text-2:    #9b9690;
+  --text-3:    #5a5750;
+
+  /* Status */
+  --green:     #4caf82;
+  --green-dim: rgba(76,175,130,0.12);
+  --red:       #e05a4e;
+  --red-dim:   rgba(224,90,78,0.12);
+
+  /* Type */
+  --font-display: 'DM Serif Display', Georgia, serif;
+  --font-body:    'Instrument Sans', system-ui, sans-serif;
+  --font-mono:    'DM Mono', 'Courier New', monospace;
+
+  font-family: var(--font-body);
+  font-size: 15px;
+  line-height: 1.6;
+  color: var(--text);
+  background: var(--bg);
+
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
 }
 
-* {
-  box-sizing: border-box;
-}
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html { scroll-behavior: smooth; }
 
 body {
-  margin: 0;
-  background:
-    linear-gradient(180deg, rgba(200, 182, 169, 0.22), rgba(248, 247, 245, 0.95)),
-    var(--paper);
+  background: var(--bg);
+  min-height: 100vh;
+  /* Subtle grain texture */
+  background-image:
+    url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.75' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.04'/%3E%3C/svg%3E");
 }
 
-button,
-input {
-  font: inherit;
-}
+button, input { font: inherit; }
 
 #root {
-  width: min(1320px, calc(100% - 40px));
-  margin: 32px auto 40px;
+  width: min(1400px, calc(100% - 48px));
+  margin: 0 auto;
+  padding: 32px 0 64px;
 }
+
+/* ── Scrollbar ── */
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border-hi); border-radius: 99px; }
