@@ -263,7 +263,7 @@ h2 {
   color: var(--text);
 }
 
-
+.open-link {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -281,6 +281,156 @@ h2 {
   padding: 24px;
 }
 
+/* ── Phase 4: Line items table ─────────────────────────────── */
+.items-section {
+  margin-top: 2rem;
+}
+
+.items-section h3 {
+  margin: 0 0 12px;
+  color: var(--text);
+}
+
+.items-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 0.5rem;
+}
+
+.items-table th,
+.items-table td {
+  border: 1px solid var(--border);
+  padding: 0.75rem;
+  text-align: left;
+  font-size: 0.88rem;
+}
+
+.items-table th {
+  background: rgba(0, 0, 0, 0.04);
+  font-weight: 600;
+  color: var(--stone);
+  text-transform: uppercase;
+  font-size: 0.74rem;
+  letter-spacing: 0.08em;
+}
+
+/* ── Phase 5: Validation panel ─────────────────────────────── */
+.validation-section {
+  margin-top: 2rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid var(--border);
+}
+
+.validation-section h3 {
+  margin: 0 0 14px;
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.validation-pill {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+
+.validation-pill--pass {
+  background: rgba(100, 160, 120, 0.15);
+  color: #3a7a52;
+}
+
+.validation-pill--fail {
+  background: rgba(200, 90, 80, 0.12);
+  color: #a03830;
+}
+
+.validation-checks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.validation-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 12px;
+  border-radius: 8px;
+  font-size: 0.85rem;
+  border: 1px solid var(--border);
+}
+
+.check--pass {
+  background: rgba(100, 160, 120, 0.10);
+  border-color: rgba(100, 160, 120, 0.3);
+}
+
+.check--fail {
+  background: rgba(200, 90, 80, 0.08);
+  border-color: rgba(200, 90, 80, 0.25);
+}
+
+.check-icon {
+  font-weight: 700;
+  font-size: 0.9rem;
+}
+
+.check--pass .check-icon {
+  color: #3a7a52;
+}
+
+.check--fail .check-icon {
+  color: #a03830;
+}
+
+.validation-errors {
+  margin: 0;
+  padding: 12px 12px 12px 28px;
+  background: rgba(200, 90, 80, 0.07);
+  border: 1px solid rgba(200, 90, 80, 0.2);
+  border-radius: 10px;
+  color: #7d4b3e;
+  font-size: 0.85rem;
+  display: grid;
+  gap: 4px;
+}
+
+/* ── Phase 6: Workflow status badge ────────────────────────── */
+.workflow-badge {
+  display: inline-block;
+  margin-bottom: 16px;
+  padding: 6px 14px;
+  border-radius: 8px;
+  font-size: 0.82rem;
+  background: rgba(150, 130, 118, 0.12);
+  color: var(--stone);
+  border: 1px solid var(--border);
+}
+
+.workflow-badge--stored {
+  background: rgba(100, 160, 120, 0.12);
+  color: #3a7a52;
+  border-color: rgba(100, 160, 120, 0.3);
+}
+
+.workflow-badge--validation-failed {
+  background: rgba(200, 90, 80, 0.10);
+  color: #a03830;
+  border-color: rgba(200, 90, 80, 0.25);
+}
+
+.workflow-badge--failed {
+  background: rgba(200, 90, 80, 0.10);
+  color: #a03830;
+  border-color: rgba(200, 90, 80, 0.25);
+}
+
+/* ── Responsive ────────────────────────────────────────────── */
 @media (max-width: 1100px) {
   .dashboard-grid {
     grid-template-columns: 1fr;
@@ -307,8 +457,3 @@ h2 {
     height: 420px;
   }
 }
-
-.items-section { margin-top: 2rem; }
-.items-table { width: 100%; border-collapse: collapse; margin-top: 1rem; }
-.items-table th, .items-table td { border: 1px solid var(--border); padding: 0.75rem; text-align: left; }
-.items-table th { background: rgba(0, 0, 0, 0.05); font-weight: 600; }

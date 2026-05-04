@@ -23,6 +23,14 @@ const FIELD_LABELS = {
   total: 'Total Amount',
 }
 
+// Phase 5: human-readable labels for validation checks
+const VALIDATION_LABELS = {
+  date_format_ok: 'Date Format',
+  amount_consistency_ok: 'Amount Consistency',
+  gst_calculation_ok: 'GST Calculation',
+  total_match_ok: 'Total Match',
+}
+
 function App() {
   const [selectedFile, setSelectedFile] = useState(null)
   const [invoices, setInvoices] = useState([])
@@ -32,6 +40,8 @@ function App() {
   const [isLoading, setIsLoading] = useState(true)
   const [isUploading, setIsUploading] = useState(false)
   const [extractedFields, setExtractedFields] = useState(null)
+  const [validationResult, setValidationResult] = useState(null)
+  const [workflowStatus, setWorkflowStatus] = useState('')
   const [isExtracting, setIsExtracting] = useState(false)
   const [extractError, setExtractError] = useState('')
 
@@ -41,24 +51,13 @@ function App() {
   async function fetchInvoices() {
     try {
       const response = await fetch('/api/invoices')
-
-      if (!response.ok) {
-        throw new Error('Could not load uploaded invoices.')
-      }
-
+      if (!response.ok) throw new Error('Could not load uploaded invoices.')
       const data = await response.json()
       const nextInvoices = data.invoices ?? []
-
       setInvoices(nextInvoices)
       setActiveInvoiceId((currentId) => {
-        if (nextInvoices.length === 0) {
-          return ''
-        }
-
-        if (currentId && nextInvoices.some((invoice) => invoice.id === currentId)) {
-          return currentId
-        }
-
+        if (nextInvoices.length === 0) return ''
+        if (currentId && nextInvoices.some((inv) => inv.id === currentId)) return currentId
         return nextInvoices[0].id
       })
       setError('')
@@ -72,39 +71,26 @@ function App() {
       await fetchInvoices()
       setIsLoading(false)
     }
-
     loadOnMount()
   }, [])
 
   async function handleSubmit(event) {
     event.preventDefault()
     const form = event.currentTarget
-
     if (!selectedFile) {
       setError('Choose an invoice file first.')
       setMessage('')
       return
     }
-
     const formData = new FormData()
     formData.append('invoice', selectedFile)
-
     setIsUploading(true)
     setError('')
     setMessage('')
-
     try {
-      const response = await fetch('/api/invoices', {
-        method: 'POST',
-        body: formData,
-      })
-
+      const response = await fetch('/api/invoices', { method: 'POST', body: formData })
       const data = await response.json()
-
-      if (!response.ok) {
-        throw new Error(data.error || 'Invoice upload failed.')
-      }
-
+      if (!response.ok) throw new Error(data.error || 'Invoice upload failed.')
       setMessage(`${data.invoice.originalName} uploaded successfully.`)
       setSelectedFile(null)
       setActiveInvoiceId(data.invoice.id)
@@ -123,6 +109,8 @@ function App() {
     if (!activeInvoice) return
     setIsExtracting(true)
     setExtractedFields(null)
+    setValidationResult(null)
+    setWorkflowStatus('')
     setExtractError('')
     try {
       const response = await fetch(`/api/invoices/${activeInvoice.id}/extract`, {
@@ -131,6 +119,8 @@ function App() {
       const data = await response.json()
       if (!response.ok) throw new Error(data.error || 'Extraction failed.')
       setExtractedFields(data.fields)
+      setValidationResult(data.validation ?? null)
+      setWorkflowStatus(data.workflow_status ?? '')
     } catch (err) {
       setExtractError(err.message)
     } finally {
@@ -142,7 +132,6 @@ function App() {
     if (!activeInvoice) {
       return <p className="empty-state">Upload an invoice to preview it here.</p>
     }
-
     if (activeInvoice.mimeType === 'application/pdf') {
       return (
         <iframe
@@ -153,7 +142,6 @@ function App() {
         />
       )
     }
-
     if (activeInvoice.mimeType.startsWith('image/')) {
       return (
         <img
@@ -164,7 +152,6 @@ function App() {
         />
       )
     }
-
     return <p className="empty-state">Preview is not available for this file type.</p>
   }
 
@@ -176,7 +163,7 @@ function App() {
           <h1>Upload and inspect invoices</h1>
           <p className="subtitle">
             Upload a PDF or image invoice, then click <strong>Extract fields</strong> to
-            run OCR and pull out key invoice data automatically.
+            run OCR, extract key data, validate amounts, and store the results.
           </p>
         </div>
       </section>
@@ -184,7 +171,6 @@ function App() {
       <section className="dashboard-grid">
         <aside className="panel upload-panel">
           <h2>Upload invoice</h2>
-
           <form className="upload-form" onSubmit={handleSubmit}>
             <label htmlFor="invoice-file">Choose PDF or image</label>
             <input
@@ -197,20 +183,17 @@ function App() {
                 setMessage('')
               }}
             />
-
             <button type="submit" disabled={isUploading}>
               {isUploading ? 'Uploading...' : 'Upload invoice'}
             </button>
           </form>
-
-          {selectedFile ? (
+          {selectedFile && (
             <p className="helper">
               Selected: {selectedFile.name} ({formatSize(selectedFile.size)})
             </p>
-          ) : null}
-
-          {message ? <p className="success">{message}</p> : null}
-          {error ? <p className="error">{error}</p> : null}
+          )}
+          {message && <p className="success">{message}</p>}
+          {error && <p className="error">{error}</p>}
         </aside>
 
         <section className="panel list-panel">
@@ -218,7 +201,6 @@ function App() {
             <h2>Uploaded documents</h2>
             <span className="badge">{invoices.length}</span>
           </div>
-
           {isLoading ? (
             <p className="helper">Loading uploaded invoices...</p>
           ) : invoices.length === 0 ? (
@@ -237,12 +219,14 @@ function App() {
                     onClick={() => {
                       setActiveInvoiceId(invoice.id)
                       setExtractedFields(null)
+                      setValidationResult(null)
+                      setWorkflowStatus('')
                       setExtractError('')
                     }}
                   >
                     <span className="invoice-name">{invoice.originalName}</span>
                     <small>
-                      {formatSize(invoice.size)} - {formatDate(invoice.uploadedAt)}
+                      {formatSize(invoice.size)} — {formatDate(invoice.uploadedAt)}
                     </small>
                   </button>
                 </li>
@@ -255,14 +239,14 @@ function App() {
           <div className="section-header">
             <div>
               <h2>Document viewer</h2>
-              {activeInvoice ? (
+              {activeInvoice && (
                 <p className="helper">
-                  {activeInvoice.originalName} - {formatSize(activeInvoice.size)}
+                  {activeInvoice.originalName} — {formatSize(activeInvoice.size)}
                 </p>
-              ) : null}
+              )}
             </div>
             <div className="preview-actions">
-              {activeInvoice ? (
+              {activeInvoice && (
                 <>
                   <button
                     type="button"
@@ -281,46 +265,62 @@ function App() {
                     Open file
                   </a>
                 </>
-              ) : null}
+              )}
             </div>
           </div>
-
           <div className="preview-surface">{renderPreview()}</div>
         </section>
 
+        {/* ── Phase 4 + 5 + 6: Extracted fields + validation panel ── */}
         {(extractedFields || extractError) && (
           <section className="panel fields-panel">
+            {/* Workflow status badge */}
+            {workflowStatus && (
+              <div className={`workflow-badge workflow-badge--${workflowStatus.replace('_', '-')}`}>
+                Workflow: <strong>{workflowStatus.replace(/_/g, ' ')}</strong>
+              </div>
+            )}
+
             <h2>Extracted fields</h2>
+
             {extractError ? (
               <p className="error">{extractError}</p>
             ) : (
               <>
+                {/* Core fields */}
                 <dl className="fields-grid">
-                  {Object.entries(FIELD_LABELS).map(([key, label]) =>
-                    extractedFields[key] ? (
+                  {Object.entries(FIELD_LABELS).map(([key, label]) => {
+                    const value = extractedFields[key]
+                    if (!value && value !== 0) return null
+                    return (
                       <div key={key} className="field-row">
                         <dt>{label}</dt>
-                        <dd>{extractedFields[key]}</dd>
+                        <dd>{typeof value === 'number' ? value.toFixed(2) : value}</dd>
                       </div>
-                    ) : null
-                  )}
+                    )
+                  })}
                 </dl>
-                
+
+                {/* Phase 4: Line items table with qty / unit price / amount */}
                 {extractedFields.items && extractedFields.items.length > 0 && (
                   <div className="items-section">
-                    <h3>Extracted Line Items</h3>
+                    <h3>Line Items</h3>
                     <table className="items-table">
                       <thead>
                         <tr>
                           <th>Description</th>
-                          <th>Extracted Values</th>
+                          <th>Qty</th>
+                          <th>Unit Price</th>
+                          <th>Amount</th>
                         </tr>
                       </thead>
                       <tbody>
                         {extractedFields.items.map((item, index) => (
                           <tr key={index}>
                             <td>{item.description}</td>
-                            <td>{item.extracted_numbers.join(', ')}</td>
+                            <td>{item.quantity ?? '—'}</td>
+                            <td>{item.unit_price != null ? item.unit_price.toFixed(2) : '—'}</td>
+                            <td>{item.amount != null ? item.amount.toFixed(2) : '—'}</td>
                           </tr>
                         ))}
                       </tbody>
@@ -328,6 +328,45 @@ function App() {
                   </div>
                 )}
 
+                {/* Phase 5: Validation panel */}
+                {validationResult && (
+                  <div className="validation-section">
+                    <h3>
+                      Validation{' '}
+                      <span
+                        className={
+                          validationResult.is_valid
+                            ? 'validation-pill validation-pill--pass'
+                            : 'validation-pill validation-pill--fail'
+                        }
+                      >
+                        {validationResult.is_valid ? 'Passed' : 'Failed'}
+                      </span>
+                    </h3>
+
+                    <div className="validation-checks">
+                      {Object.entries(VALIDATION_LABELS).map(([key, label]) => (
+                        <div
+                          key={key}
+                          className={`validation-check ${validationResult[key] ? 'check--pass' : 'check--fail'}`}
+                        >
+                          <span className="check-icon">{validationResult[key] ? '✓' : '✗'}</span>
+                          <span>{label}</span>
+                        </div>
+                      ))}
+                    </div>
+
+                    {validationResult.errors && validationResult.errors.length > 0 && (
+                      <ul className="validation-errors">
+                        {validationResult.errors.map((err, i) => (
+                          <li key={i}>{err}</li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                )}
+
+                {/* Raw text toggle */}
                 {extractedFields.raw_text && (
                   <details className="raw-text-details">
                     <summary>Raw extracted text</summary>
