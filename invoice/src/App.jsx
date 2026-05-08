@@ -198,6 +198,14 @@ export default function App() {
             <span className="stat-label">Pending</span>
           </div>
         </div>
+
+        {storedCount > 0 && (
+          <div className="export-bar">
+            <span className="export-bar-label">Export All</span>
+            <button type="button" className="export-btn" onClick={() => window.open('/api/export/csv', '_blank')}>📄 CSV</button>
+            <button type="button" className="export-btn" onClick={() => window.open('/api/export/excel', '_blank')}>📊 Excel</button>
+          </div>
+        )}
       </header>
 
       <div className="dashboard-grid">
@@ -327,6 +335,10 @@ export default function App() {
                     : '⚡ Extract Fields'
                   }
                 </button>
+                <button type="button" className="export-btn" title="Export CSV"
+                  onClick={() => window.open(`/api/invoices/${activeInvoice.id}/export/csv`, '_blank')}>📄 CSV</button>
+                <button type="button" className="export-btn" title="Export Excel"
+                  onClick={() => window.open(`/api/invoices/${activeInvoice.id}/export/excel`, '_blank')}>📊 Excel</button>
                 <a className="open-link" href={activeInvoice.previewUrl}
                   target="_blank" rel="noreferrer">↗ Open</a>
               </div>
