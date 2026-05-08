@@ -1,6 +1,8 @@
 from datetime import datetime
 import mimetypes
 import re
+import csv
+import io
 from pathlib import Path
 from uuid import uuid4
 
@@ -741,6 +743,161 @@ def get_validation(invoice_id):
     if not row:
         return jsonify({"error": "No validation record found."}), 404
     return jsonify({"validation": row}), 200
+
+
+# ── Phase 8: Export & Integration ────────────────────────────────────────────
+
+EXPORT_COLUMNS = [
+    "invoice_id", "invoice_number", "invoice_date", "due_date",
+    "vendor", "bill_to", "subtotal", "tax", "total",
+]
+
+
+def _fetch_export_rows(db, invoice_id=None):
+    """Fetch invoice_fields rows for export. Optionally filter by one invoice."""
+    query = (
+        "SELECT f.invoice_id, f.invoice_number, f.invoice_date, f.due_date, "
+        "f.vendor, f.bill_to, f.subtotal, f.tax, f.total, "
+        "v.is_valid, v.date_format_ok, v.amount_consistency_ok, "
+        "v.gst_calculation_ok, v.total_match_ok "
+        "FROM invoice_fields f "
+        "LEFT JOIN invoice_validation v ON f.invoice_id = v.invoice_id "
+    )
+    params = ()
+    if invoice_id:
+        query += "WHERE f.invoice_id = %s "
+        params = (invoice_id,)
+    query += "ORDER BY f.extracted_at DESC"
+    with db.cursor() as cur:
+        cur.execute(query, params)
+        return cur.fetchall()
+
+
+def _build_csv(rows):
+    """Build a CSV string from export rows."""
+    output = io.StringIO()
+    all_cols = EXPORT_COLUMNS + ["is_valid", "date_format_ok", "amount_consistency_ok",
+                                  "gst_calculation_ok", "total_match_ok"]
+    writer = csv.DictWriter(output, fieldnames=all_cols, extrasaction="ignore")
+    writer.writeheader()
+    for row in rows:
+        writer.writerow(row)
+    return output.getvalue()
+
+
+def _build_excel(rows):
+    """Build an Excel (.xlsx) workbook in memory from export rows."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Invoices"
+
+    all_cols = EXPORT_COLUMNS + ["is_valid", "date_format_ok", "amount_consistency_ok",
+                                  "gst_calculation_ok", "total_match_ok"]
+    # Header style
+    header_font = Font(bold=True, color="FFFFFF", size=11)
+    header_fill = PatternFill(start_color="2E3440", end_color="2E3440", fill_type="solid")
+    header_align = Alignment(horizontal="center", vertical="center")
+    thin_border = Border(
+        left=Side(style="thin"),
+        right=Side(style="thin"),
+        top=Side(style="thin"),
+        bottom=Side(style="thin"),
+    )
+
+    # Write header
+    for col_idx, col_name in enumerate(all_cols, 1):
+        cell = ws.cell(row=1, column=col_idx, value=col_name.replace("_", " ").title())
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = header_align
+        cell.border = thin_border
+
+    # Write data rows
+    for row_idx, row_data in enumerate(rows, 2):
+        for col_idx, col_name in enumerate(all_cols, 1):
+            val = row_data.get(col_name)
+            # Convert Decimal to float for Excel
+            if hasattr(val, "as_tuple"):  # Decimal check
+                val = float(val)
+            cell = ws.cell(row=row_idx, column=col_idx, value=val)
+            cell.border = thin_border
+            cell.alignment = Alignment(horizontal="center")
+
+    # Auto-width columns
+    for col_idx, col_name in enumerate(all_cols, 1):
+        max_len = max(len(col_name), 12)
+        for row_data in rows:
+            cell_val = str(row_data.get(col_name, "") or "")
+            max_len = max(max_len, len(cell_val))
+        ws.column_dimensions[ws.cell(row=1, column=col_idx).column_letter].width = min(max_len + 4, 40)
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf
+
+
+@app.route("/api/invoices/<invoice_id>/export/csv", methods=["GET"])
+def export_invoice_csv(invoice_id):
+    """Phase 8: Export a single invoice's extracted data as CSV."""
+    db = get_db()
+    rows = _fetch_export_rows(db, invoice_id=invoice_id)
+    if not rows:
+        return jsonify({"error": "No extracted data found for this invoice."}), 404
+    csv_text = _build_csv(rows)
+    buf = io.BytesIO(csv_text.encode("utf-8"))
+    buf.seek(0)
+    return send_file(
+        buf, mimetype="text/csv", as_attachment=True,
+        download_name=f"invoice_{invoice_id}.csv",
+    )
+
+
+@app.route("/api/invoices/<invoice_id>/export/excel", methods=["GET"])
+def export_invoice_excel(invoice_id):
+    """Phase 8: Export a single invoice's extracted data as Excel."""
+    db = get_db()
+    rows = _fetch_export_rows(db, invoice_id=invoice_id)
+    if not rows:
+        return jsonify({"error": "No extracted data found for this invoice."}), 404
+    buf = _build_excel(rows)
+    return send_file(
+        buf, mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        as_attachment=True, download_name=f"invoice_{invoice_id}.xlsx",
+    )
+
+
+@app.route("/api/export/csv", methods=["GET"])
+def export_all_csv():
+    """Phase 8: Export ALL extracted invoices as a single CSV file."""
+    db = get_db()
+    rows = _fetch_export_rows(db)
+    if not rows:
+        return jsonify({"error": "No extracted data found."}), 404
+    csv_text = _build_csv(rows)
+    buf = io.BytesIO(csv_text.encode("utf-8"))
+    buf.seek(0)
+    return send_file(
+        buf, mimetype="text/csv", as_attachment=True,
+        download_name="all_invoices.csv",
+    )
+
+
+@app.route("/api/export/excel", methods=["GET"])
+def export_all_excel():
+    """Phase 8: Export ALL extracted invoices as a single Excel file."""
+    db = get_db()
+    rows = _fetch_export_rows(db)
+    if not rows:
+        return jsonify({"error": "No extracted data found."}), 404
+    buf = _build_excel(rows)
+    return send_file(
+        buf, mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        as_attachment=True, download_name="all_invoices.xlsx",
+    )
 
 
 if __name__ == "__main__":
