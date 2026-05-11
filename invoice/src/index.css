@@ -1,66 +1,95 @@
 @import url('https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Mono:wght@300;400;500&family=Instrument+Sans:wght@400;500;600&display=swap');
 
-:root {
-  /* Core palette */
-  --bg:        #0e0e10;
-  --bg2:       #141416;
-  --bg3:       #1a1a1e;
-  --border:    rgba(255,255,255,0.07);
-  --border-hi: rgba(255,255,255,0.14);
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
 
-  /* Accent */
-  --gold:      #c9a84c;
-  --gold-dim:  rgba(201,168,76,0.15);
-  --gold-glow: rgba(201,168,76,0.25);
+@layer base {
+  :root {
+    font-synthesis: none;
+    text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
+  }
 
-  /* Text */
-  --text:      #f0ede8;
-  --text-2:    #9b9690;
-  --text-3:    #5a5750;
+  html {
+    scroll-behavior: smooth;
+  }
 
-  /* Status */
-  --green:     #4caf82;
-  --green-dim: rgba(76,175,130,0.12);
-  --red:       #e05a4e;
-  --red-dim:   rgba(224,90,78,0.12);
+  body {
+    @apply bg-bg text-text font-body min-h-screen;
+    font-size: 15px;
+    line-height: 1.6;
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.75' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.04'/%3E%3C/svg%3E");
+  }
 
-  /* Type */
-  --font-display: 'DM Serif Display', Georgia, serif;
-  --font-body:    'Instrument Sans', system-ui, sans-serif;
-  --font-mono:    'DM Mono', 'Courier New', monospace;
+  button, input {
+    font: inherit;
+  }
 
-  font-family: var(--font-body);
-  font-size: 15px;
-  line-height: 1.6;
-  color: var(--text);
-  background: var(--bg);
+  #root {
+    width: min(1400px, calc(100% - 48px));
+    margin: 0 auto;
+    padding: 32px 0 64px;
+  }
 
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
-  -webkit-font-smoothing: antialiased;
+  ::-webkit-scrollbar {
+    width: 4px;
+    height: 4px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    @apply bg-border-hi rounded-full;
+  }
 }
 
-*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+@layer utilities {
+  @keyframes fadeUp {
+    from { opacity: 0; transform: translateY(16px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
 
-html { scroll-behavior: smooth; }
+  @keyframes slideIn {
+    from { opacity: 0; transform: translateY(-6px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
 
-body {
-  background: var(--bg);
-  min-height: 100vh;
-  /* Subtle grain texture */
-  background-image:
-    url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.75' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.04'/%3E%3C/svg%3E");
+  @keyframes shimmer {
+    0% { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
+  }
+
+  @keyframes pulseDot {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.3; transform: scale(0.65); }
+  }
+
+  @keyframes progressBar {
+    0% { width: 5%; }
+    50% { width: 72%; }
+    100% { width: 5%; }
+  }
+
+  .animate-fadeUp {
+    animation: fadeUp 0.5s ease both;
+  }
+
+  .animate-slideIn {
+    animation: slideIn 0.2s ease both;
+  }
+
+  .animate-shimmer {
+    animation: shimmer 1.5s ease infinite;
+  }
+
+  .animate-pulseDot {
+    animation: pulseDot 1s ease-in-out infinite;
+  }
+
+  .animate-progressBar {
+    animation: progressBar 1.8s ease-in-out infinite;
+  }
 }
-
-button, input { font: inherit; }
-
-#root {
-  width: min(1400px, calc(100% - 48px));
-  margin: 0 auto;
-  padding: 32px 0 64px;
-}
-
-/* ── Scrollbar ── */
-::-webkit-scrollbar { width: 4px; height: 4px; }
-::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: var(--border-hi); border-radius: 99px; }
