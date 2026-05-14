@@ -1,54 +1,54 @@
 from datetime import datetime, timedelta
 import hashlib
-import mimetypes
-import re
-import csv
 import io
-from pathlib import Path
-from uuid import uuid4
-import secrets
-from functools import wraps
-
-from flask import Flask, jsonify, request, send_file, g
-from flask_cors import CORS
-from dotenv import load_dotenv
-from werkzeug.utils import secure_filename
-from werkzeug.security import generate_password_hash, check_password_hash
+import json
+import logging
+import mimetypes
 import os
+import re
+from functools import wraps
+from pathlib import Path
+import secrets
+from uuid import uuid4
+
+from dotenv import load_dotenv
+from flask import Flask, g, jsonify, request, send_file
+from flask_cors import CORS
 import pymysql
 import pymysql.cursors
-import pdfplumber
-import pytesseract
-from PIL import Image
-import cv2
-import numpy as np
+from werkzeug.security import check_password_hash, generate_password_hash
+from werkzeug.utils import secure_filename
 
-try:
-    import spacy
-    nlp = spacy.load("en_core_web_sm")
-except (ImportError, OSError):
-    nlp = None
+from services.extraction import (
+    FIELD_PATTERNS,
+    extract_fields_from_text,
+    extract_line_items,
+    parse_amount,
+    validate_date_format,
+    validate_fields,
+)
+from services.exporters import build_csv, build_excel, fetch_export_rows
+from services.workflow import log_workflow, run_workflow
 
 load_dotenv()
 
 app = Flask(__name__)
 
+# Configure logging
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
 BASE_DIR = Path(__file__).resolve().parent
 UPLOAD_FOLDER = BASE_DIR / "uploads"
 ALLOWED_EXTENSIONS = {"pdf", "png", "jpg", "jpeg"}
 
-# ── MySQL connection config (read from .env) ──────────────────────────────────
-# Add these to your .env file:
-#   DB_HOST=localhost
-#   DB_PORT=3306
-#   DB_USER=root
-#   DB_PASSWORD=yourpassword
-#   DB_NAME=invoices_db
-
 DB_CONFIG = {
-    "host":     os.getenv("DB_HOST", "localhost"),
-    "port":     int(os.getenv("DB_PORT", 3306)),
-    "user":     os.getenv("DB_USER", "root"),
+    "host": os.getenv("DB_HOST", "localhost"),
+    "port": int(os.getenv("DB_PORT", 3306)),
+    "user": os.getenv("DB_USER", "root"),
     "password": os.getenv("DB_PASSWORD", ""),
     "database": os.getenv("DB_NAME", "invoices_db"),
     "cursorclass": pymysql.cursors.DictCursor,
@@ -72,9 +72,6 @@ CORS(
         }
     },
 )
-
-# ── Phase 7: MySQL Database Schema ───────────────────────────────────────────
-# Run init_db() once on startup — creates all tables if they don't exist.
 
 SCHEMA_STATEMENTS = [
     """
@@ -177,11 +174,40 @@ SCHEMA_STATEMENTS = [
         FOREIGN KEY (invoice_id) REFERENCES invoices(id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
     """,
+    """
+    CREATE TABLE IF NOT EXISTS invoice_decisions (
+        id                INT           PRIMARY KEY AUTO_INCREMENT,
+        invoice_id        VARCHAR(255)  NOT NULL,
+        organization_id   INT           NOT NULL,
+        reviewer_user_id  INT           NULL,
+        decision          VARCHAR(20)   NOT NULL,
+        reason            TEXT,
+        confidence_score  DECIMAL(5,2)  NULL,
+        decided_at        DATETIME      NOT NULL,
+        updated_at        DATETIME      NOT NULL,
+        UNIQUE KEY uq_invoice_decision (invoice_id),
+        FOREIGN KEY (invoice_id) REFERENCES invoices(id) ON DELETE CASCADE,
+        FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE CASCADE,
+        FOREIGN KEY (reviewer_user_id) REFERENCES users(id) ON DELETE SET NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS ml_training_samples (
+        id               INT           PRIMARY KEY AUTO_INCREMENT,
+        invoice_id       VARCHAR(255)  NOT NULL,
+        organization_id  INT           NOT NULL,
+        label            VARCHAR(20)   NOT NULL,
+        features_json    LONGTEXT      NOT NULL,
+        created_at       DATETIME      NOT NULL,
+        FOREIGN KEY (invoice_id) REFERENCES invoices(id) ON DELETE CASCADE,
+        FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE CASCADE,
+        INDEX idx_ml_training_org_created (organization_id, created_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    """,
 ]
 
 
 def get_db():
-    """Return a per-request MySQL connection stored on Flask's g object."""
     if "db" not in g:
         g.db = pymysql.connect(**DB_CONFIG)
     return g.db
@@ -192,35 +218,6 @@ def close_db(exception=None):
     db = g.pop("db", None)
     if db is not None:
         db.close()
-
-
-def init_db():
-    """Create all tables and seed demo users if missing."""
-    con = pymysql.connect(**DB_CONFIG)
-    try:
-        with con.cursor() as cur:
-            for statement in SCHEMA_STATEMENTS:
-                clean = re.sub(r"--[^\n]*", "", statement).strip()
-                if clean:
-                    cur.execute(clean)
-            cur.execute(
-                "SELECT COUNT(*) AS count FROM information_schema.COLUMNS "
-                "WHERE TABLE_SCHEMA = %s AND TABLE_NAME = 'invoices' AND COLUMN_NAME = 'organization_id'",
-                (DB_CONFIG["database"],),
-            )
-            if cur.fetchone()["count"] == 0:
-                cur.execute("ALTER TABLE invoices ADD COLUMN organization_id INT NULL")
-            cur.execute(
-                "SELECT COUNT(*) AS count FROM information_schema.COLUMNS "
-                "WHERE TABLE_SCHEMA = %s AND TABLE_NAME = 'invoices' AND COLUMN_NAME = 'uploaded_by_user_id'",
-                (DB_CONFIG["database"],),
-            )
-            if cur.fetchone()["count"] == 0:
-                cur.execute("ALTER TABLE invoices ADD COLUMN uploaded_by_user_id INT NULL")
-        con.commit()
-        seed_default_access(con)
-    finally:
-        con.close()
 
 
 def create_org_if_missing(db, name: str, slug: str) -> int:
@@ -252,15 +249,39 @@ def create_user_if_missing(db, organization_id: int, full_name: str, email: str,
 
 
 def seed_default_access(db):
-    """
-    Creates starter organizations/users if they are missing.
-    This keeps local development usable right after migration.
-    """
     alpha_org_id = create_org_if_missing(db, "Alpha Traders", "alpha-traders")
     zen_org_id = create_org_if_missing(db, "Zen Supplies", "zen-supplies")
     create_user_if_missing(db, alpha_org_id, "Alpha Admin", "alpha.admin@demo.com", "alpha123")
     create_user_if_missing(db, zen_org_id, "Zen Admin", "zen.admin@demo.com", "zen123")
     db.commit()
+
+
+def init_db():
+    con = pymysql.connect(**DB_CONFIG)
+    try:
+        with con.cursor() as cur:
+            for statement in SCHEMA_STATEMENTS:
+                clean = re.sub(r"--[^\n]*", "", statement).strip()
+                if clean:
+                    cur.execute(clean)
+            cur.execute(
+                "SELECT COUNT(*) AS count FROM information_schema.COLUMNS "
+                "WHERE TABLE_SCHEMA = %s AND TABLE_NAME = 'invoices' AND COLUMN_NAME = 'organization_id'",
+                (DB_CONFIG["database"],),
+            )
+            if cur.fetchone()["count"] == 0:
+                cur.execute("ALTER TABLE invoices ADD COLUMN organization_id INT NULL")
+            cur.execute(
+                "SELECT COUNT(*) AS count FROM information_schema.COLUMNS "
+                "WHERE TABLE_SCHEMA = %s AND TABLE_NAME = 'invoices' AND COLUMN_NAME = 'uploaded_by_user_id'",
+                (DB_CONFIG["database"],),
+            )
+            if cur.fetchone()["count"] == 0:
+                cur.execute("ALTER TABLE invoices ADD COLUMN uploaded_by_user_id INT NULL")
+        con.commit()
+        seed_default_access(con)
+    finally:
+        con.close()
 
 
 def _token_hash(token: str) -> str:
@@ -276,6 +297,23 @@ def _serialize_user(row: dict) -> dict:
         "organizationName": row["organization_name"],
         "organizationSlug": row["organization_slug"],
     }
+
+
+def _slugify_org_name(name: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", (name or "").strip().lower()).strip("-")
+    return slug or "org"
+
+
+def _create_unique_org_slug(cur, organization_name: str) -> str:
+    base_slug = _slugify_org_name(organization_name)
+    slug = base_slug
+    suffix = 1
+    while True:
+        cur.execute("SELECT id FROM organizations WHERE slug = %s LIMIT 1", (slug,))
+        if not cur.fetchone():
+            return slug
+        suffix += 1
+        slug = f"{base_slug}-{suffix}"
 
 
 def get_user_from_token(token: str):
@@ -325,6 +363,7 @@ def require_auth(fn):
         if not g.get("current_user"):
             return jsonify({"error": "Authentication required."}), 401
         return fn(*args, **kwargs)
+
     return wrapper
 
 
@@ -335,8 +374,6 @@ def current_org_id() -> int:
 def current_user_id() -> int:
     return g.current_user["id"]
 
-
-# ── File helpers ─────────────────────────────────────────────────────────────
 
 def allowed_file(filename):
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
@@ -354,6 +391,7 @@ def serialize_invoice_row(row):
         "uploadedAt": uploaded_at,
         "mimeType": row["mime_type"],
         "status": row.get("status") or "uploaded",
+        "decision": row.get("decision"),
         "previewUrl": f"/api/invoices/{row['id']}/file",
     }
 
@@ -378,10 +416,11 @@ def list_uploaded_invoices(organization_id: int):
     with db.cursor() as cur:
         cur.execute(
             """
-            SELECT id, filename, original_name, mime_type, file_size, uploaded_at, status
-            FROM invoices
-            WHERE organization_id = %s
-            ORDER BY uploaded_at DESC
+            SELECT i.id, i.filename, i.original_name, i.mime_type, i.file_size, i.uploaded_at, i.status, d.decision
+            FROM invoices i
+            LEFT JOIN invoice_decisions d ON d.invoice_id = i.id
+            WHERE i.organization_id = %s
+            ORDER BY i.uploaded_at DESC
             """,
             (organization_id,),
         )
@@ -413,429 +452,145 @@ def get_invoice_file(invoice_row: dict):
     return file_path
 
 
-# ── Phase 6: Workflow log helper ─────────────────────────────────────────────
-
-def log_workflow(db, invoice_id: str, step: str, status: str, message: str = ""):
+def get_invoice_review_data(invoice_id: str, organization_id: int):
+    db = get_db()
     with db.cursor() as cur:
         cur.execute(
-            "INSERT INTO workflow_log (invoice_id, step, status, message, created_at) VALUES (%s,%s,%s,%s,%s)",
-            (invoice_id, step, status, message, datetime.utcnow()),
+            """
+            SELECT i.id, i.original_name, i.mime_type, i.file_size, i.uploaded_at, i.status,
+                   f.invoice_number, f.invoice_date, f.due_date, f.vendor, f.bill_to,
+                   f.subtotal, f.tax, f.total, f.raw_text,
+                   d.decision, d.reason, d.confidence_score, d.decided_at
+            FROM invoices i
+            LEFT JOIN invoice_fields f ON f.invoice_id = i.id
+            LEFT JOIN invoice_decisions d ON d.invoice_id = i.id
+            WHERE i.id = %s AND i.organization_id = %s
+            LIMIT 1
+            """,
+            (invoice_id, organization_id),
         )
-        cur.execute("UPDATE invoices SET status = %s WHERE id = %s", (status, invoice_id))
-    db.commit()
+        row = cur.fetchone()
+        if not row:
+            return None
 
+        cur.execute(
+            """
+            SELECT description, quantity, unit_price, amount
+            FROM invoice_line_items
+            WHERE invoice_id = %s
+            ORDER BY id ASC
+            """,
+            (invoice_id,),
+        )
+        items = cur.fetchall()
 
-# ── Phase 2 & 3: Image preprocessing + OCR ──────────────────────────────────
+        cur.execute(
+            """
+            SELECT is_valid, date_format_ok, amount_consistency_ok, gst_calculation_ok, total_match_ok, errors
+            FROM invoice_validation
+            WHERE invoice_id = %s
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (invoice_id,),
+        )
+        validation = cur.fetchone()
 
-def deskew_image(image):
-    try:
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        gray = cv2.bitwise_not(gray)
-        thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)[1]
-        coords = np.column_stack(np.where(thresh > 0))
-        rect = cv2.minAreaRect(coords)
-        angle = rect[-1]
-        if angle < -45:
-            angle = -(90 + angle)
-        elif angle > 45:
-            angle = 90 - angle
-        elif angle < 0:
-            angle = -angle
-        else:
-            angle = -angle
-        if abs(angle) < 0.5 or abs(angle) > 45:
-            return image
-        (h, w) = image.shape[:2]
-        center = (w // 2, h // 2)
-        M = cv2.getRotationMatrix2D(center, angle, 1.0)
-        return cv2.warpAffine(image, M, (w, h), flags=cv2.INTER_CUBIC,
-                              borderMode=cv2.BORDER_REPLICATE)
-    except Exception:
-        return image
+        cur.execute(
+            """
+            SELECT status
+            FROM workflow_log
+            WHERE invoice_id = %s
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (invoice_id,),
+        )
+        wf = cur.fetchone()
 
+    fields = {
+        "invoice_number": row.get("invoice_number"),
+        "date": row.get("invoice_date"),
+        "due_date": row.get("due_date"),
+        "vendor": row.get("vendor"),
+        "bill_to": row.get("bill_to"),
+        "subtotal": float(row["subtotal"]) if row.get("subtotal") is not None else None,
+        "tax": float(row["tax"]) if row.get("tax") is not None else None,
+        "total": float(row["total"]) if row.get("total") is not None else None,
+        "raw_text": row.get("raw_text") or "",
+        "items": [
+            {
+                "description": item.get("description", ""),
+                "quantity": float(item["quantity"]) if item.get("quantity") is not None else None,
+                "unit_price": float(item["unit_price"]) if item.get("unit_price") is not None else None,
+                "amount": float(item["amount"]) if item.get("amount") is not None else None,
+            }
+            for item in items
+        ],
+    }
 
-def preprocess_image_for_ocr(file_path: Path) -> Image.Image:
-    image = cv2.imread(str(file_path))
-    if image is None:
-        raise ValueError("Could not read image file.")
-    deskewed = deskew_image(image)
-    gray = cv2.cvtColor(deskewed, cv2.COLOR_BGR2GRAY)
-    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-    thresh = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                   cv2.THRESH_BINARY, 11, 2)
-    return Image.fromarray(thresh)
-
-
-def extract_text_from_file(file_path: Path) -> str:
-    suffix = file_path.suffix.lower()
-    if suffix == ".pdf":
-        with pdfplumber.open(file_path) as pdf:
-            pages_text = [page.extract_text() or "" for page in pdf.pages]
-        return "\n".join(pages_text)
-    else:
-        image = preprocess_image_for_ocr(file_path)
-        return pytesseract.image_to_string(image)
-
-
-# ── Phase 4: Improved field extraction ──────────────────────────────────────
-
-FIELD_PATTERNS = {
-    "invoice_number": re.compile(
-        r"(?:invoice\s*(?:no\.?|number|#|num)[:\s]*)([A-Za-z0-9\-/]+)", re.I
-    ),
-    "date": re.compile(
-        r"(?:^|\b)(?:invoice\s*)?date[:\s]*([\d]{1,2}[\-\/][\d]{1,2}[\-\/][\d]{2,4}"
-        r"|[A-Za-z]+\s+\d{1,2},?\s+\d{4})",
-        re.I | re.MULTILINE,
-    ),
-    "due_date": re.compile(
-        r"(?:due\s*date|payment\s*due|pay\s*by)[:\s]*([\d]{1,2}[\-\/][\d]{1,2}[\-\/][\d]{2,4}"
-        r"|[A-Za-z]+\s+\d{1,2},?\s+\d{4})",
-        re.I,
-    ),
-    "vendor": re.compile(
-        r"(?:^|\b)(?:from|vendor|billed?\s*by|seller|company)[:\s]*([^\n]{3,60})", re.I | re.MULTILINE
-    ),
-    "bill_to": re.compile(
-        r"(?:bill\s*to|client|customer|sold\s*to|ship\s*to)[:\s]*([^\n]{3,60})", re.I
-    ),
-    "subtotal": re.compile(
-        r"(?:sub[\s-]?total)[:\s]*[\$£€₹]?\s*([\d,]+\.?\d*)", re.I
-    ),
-    "tax": re.compile(
-        r"(?:tax|vat|gst|hst|pst|cgst|sgst|igst)[:\s]*[\$£€₹]?\s*([\d,]+\.?\d*)", re.I
-    ),
-    "total": re.compile(
-        r"(?:(?:grand\s*)?total(?:\s*(?:amount|due))?|amount\s*due|balance\s*due)"
-        r"[:\s]*[\$£€₹]?\s*([\d,]+\.?\d*)",
-        re.I,
-    ),
-}
-
-# Patterns for line items: description  [qty]  unit_price  amount
-LINE_ITEM_PATTERN = re.compile(
-    r"^(?P<desc>[A-Za-z][^\t\n]{5,60}?)\s+"
-    r"(?:(?P<qty>\d+(?:\.\d+)?)\s+)?"
-    r"(?P<unit_price>[\d,]+\.\d{2})\s+"
-    r"(?P<amount>[\d,]+\.\d{2})\s*$",
-    re.MULTILINE,
-)
-
-IGNORE_LINE_KEYWORDS = re.compile(
-    r"^\s*(?:total|subtotal|sub total|tax|vat|gst|balance|amount due|"
-    r"invoice|date|due|bill|from|to|description|item|qty|quantity|"
-    r"unit|price|rate|no\.|#)\b",
-    re.I,
-)
-
-
-def parse_amount(value: str) -> float | None:
-    """Strip currency symbols/commas and convert to float."""
-    try:
-        cleaned = re.sub(r"[^\d.]", "", value)
-        return float(cleaned) if cleaned else None
-    except ValueError:
-        return None
-
-
-def extract_line_items(text: str) -> list[dict]:
-    """
-    Phase 4: Extract structured line items using regex.
-    Falls back to NLP heuristics when the structured pattern finds nothing.
-    """
-    items = []
-
-    # --- Structured regex approach ---
-    for match in LINE_ITEM_PATTERN.finditer(text):
-        desc = match.group("desc").strip()
-        if IGNORE_LINE_KEYWORDS.match(desc):
-            continue
-        item = {
-            "description": desc,
-            "quantity": None,
-            "unit_price": None,
-            "amount": None,
+    decision = None
+    if row.get("decision"):
+        decision = {
+            "decision": row["decision"],
+            "reason": row.get("reason") or "",
+            "confidenceScore": float(row["confidence_score"]) if row.get("confidence_score") is not None else None,
+            "decidedAt": row["decided_at"].isoformat() if isinstance(row.get("decided_at"), datetime) else row.get("decided_at"),
         }
-        if match.group("qty"):
-            item["quantity"] = parse_amount(match.group("qty"))
-        if match.group("unit_price"):
-            item["unit_price"] = parse_amount(match.group("unit_price"))
-        if match.group("amount"):
-            item["amount"] = parse_amount(match.group("amount"))
-        items.append(item)
 
-    if items:
-        return items
-
-    # --- NLP heuristic fallback ---
-    if not nlp:
-        return []
-
-    for line in text.split("\n"):
-        line = line.strip()
-        if not line or len(line) < 10:
-            continue
-        if IGNORE_LINE_KEYWORDS.match(line):
-            continue
-        doc = nlp(line)
-        has_noun = any(t.pos_ in ("NOUN", "PROPN") for t in doc)
-        numbers = []
-        for token in doc:
-            if token.like_num or token.pos_ == "NUM":
-                val = parse_amount(token.text)
-                if val is not None:
-                    numbers.append(val)
-        if has_noun and numbers:
-            amount = max(numbers) if numbers else None
-            unit_price = numbers[-2] if len(numbers) >= 2 else None
-            qty = numbers[0] if len(numbers) >= 3 else None
-            items.append({
-                "description": line,
-                "quantity": qty,
-                "unit_price": unit_price,
-                "amount": amount,
-            })
-
-    return items
-
-
-def extract_fields_from_text(text: str) -> dict:
-    """Phase 4: Extract all structured fields from raw OCR text."""
-    fields: dict = {}
-
-    for key, pattern in FIELD_PATTERNS.items():
-        match = pattern.search(text)
-        if match:
-            fields[key] = match.group(1).strip()
-
-    # NLP fallback for vendor if regex missed it
-    if not fields.get("vendor") and nlp:
-        doc = nlp(text[:800])
-        for ent in doc.ents:
-            if ent.label_ == "ORG":
-                fields["vendor"] = ent.text.strip()
-                break
-
-    # Coerce numeric fields to floats for validation later
-    for numeric_key in ("subtotal", "tax", "total"):
-        if fields.get(numeric_key):
-            fields[numeric_key] = parse_amount(fields[numeric_key])
-
-    fields["raw_text"] = text.strip()
-    fields["items"] = extract_line_items(text)
-    return fields
-
-
-# ── Phase 5: Data Validation ─────────────────────────────────────────────────
-
-DATE_FORMATS = [
-    r"^\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}$",          # DD/MM/YYYY or MM-DD-YYYY
-    r"^[A-Za-z]+ \d{1,2},? \d{4}$",                  # Month DD, YYYY
-    r"^\d{4}[\/\-]\d{1,2}[\/\-]\d{1,2}$",             # YYYY-MM-DD
-]
-
-GST_RATE = 0.18          # 18 % standard Indian GST; adjust as needed
-GST_TOLERANCE = 0.02     # allow 2 % rounding tolerance
-
-
-def validate_date_format(value: str | None) -> bool:
-    if not value:
-        return False
-    return any(re.match(pat, value.strip()) for pat in DATE_FORMATS)
-
-
-def validate_fields(fields: dict) -> dict:
-    """
-    Phase 5: Validate extracted fields.
-    Returns a validation result dict.
-    """
-    errors = []
-    result = {
-        "date_format_ok": False,
-        "amount_consistency_ok": False,
-        "gst_calculation_ok": False,
-        "total_match_ok": False,
+    invoice_meta = {
+        "id": row["id"],
+        "originalName": row["original_name"],
+        "mimeType": row["mime_type"],
+        "size": int(row["file_size"]) if row.get("file_size") is not None else 0,
+        "uploadedAt": row["uploaded_at"].isoformat() if isinstance(row.get("uploaded_at"), datetime) else row.get("uploaded_at"),
+        "status": row.get("status"),
     }
 
-    # --- Date format check ---
-    date_val = fields.get("date")
-    if validate_date_format(date_val):
-        result["date_format_ok"] = True
-    else:
-        errors.append(f"Invoice date '{date_val}' is missing or not a recognised format.")
-
-    # --- Numeric amounts ---
-    subtotal = fields.get("subtotal")
-    tax = fields.get("tax")
-    total = fields.get("total")
-
-    # Convert if still strings (edge case)
-    if isinstance(subtotal, str):
-        subtotal = parse_amount(subtotal)
-    if isinstance(tax, str):
-        tax = parse_amount(tax)
-    if isinstance(total, str):
-        total = parse_amount(total)
-
-    # --- Amount consistency: subtotal + tax ≈ total ---
-    if subtotal is not None and tax is not None and total is not None:
-        expected_total = round(subtotal + tax, 2)
-        actual_total = round(total, 2)
-        if abs(expected_total - actual_total) <= 0.05:
-            result["amount_consistency_ok"] = True
-            result["total_match_ok"] = True
-        else:
-            errors.append(
-                f"Total mismatch: subtotal ({subtotal}) + tax ({tax}) = {expected_total}, "
-                f"but extracted total is {actual_total}."
-            )
-    elif total is not None:
-        # If only total is available, consider totals as present
-        result["total_match_ok"] = True
-    else:
-        errors.append("Could not find subtotal, tax, or total to verify amounts.")
-
-    # --- GST consistency: tax ≈ subtotal × GST_RATE ---
-    if subtotal is not None and tax is not None and subtotal > 0:
-        expected_gst = round(subtotal * GST_RATE, 2)
-        if abs(tax - expected_gst) / subtotal <= GST_TOLERANCE:
-            result["gst_calculation_ok"] = True
-        else:
-            # Non-blocking warning – different tax rates are valid
-            errors.append(
-                f"Tax ({tax}) doesn't match standard 18% GST on subtotal ({subtotal}). "
-                "This may be correct if a different rate applies."
-            )
-
-    result["is_valid"] = len([e for e in errors if "doesn't match standard" not in e]) == 0
-    result["errors"] = errors
-    return result
-
-
-# ── Phase 6: Workflow orchestration ─────────────────────────────────────────
-
-def run_workflow(invoice_id: str, file_path: Path, db) -> dict:
-    """
-    Phase 6: Full Extract → Validate → Store pipeline.
-    Each step is logged to workflow_log.
-    """
-
-    # STEP 1 – Extract
-    log_workflow(db, invoice_id, "extract", "extracting", "Starting OCR extraction.")
-    try:
-        text = extract_text_from_file(file_path)
-        fields = extract_fields_from_text(text)
-        log_workflow(db, invoice_id, "extract", "extracted", "OCR extraction complete.")
-    except Exception as exc:
-        log_workflow(db, invoice_id, "extract", "failed", str(exc))
-        return {"error": f"Extraction failed: {exc}"}
-
-    # STEP 2 – Validate
-    log_workflow(db, invoice_id, "validate", "validating", "Starting validation.")
-    validation = validate_fields(fields)
-    validation_status = "validated" if validation["is_valid"] else "validation_failed"
-    log_workflow(db, invoice_id, "validate", validation_status,
-                 "; ".join(validation["errors"]) if validation["errors"] else "Validation passed.")
-
-    # STEP 3 – Store into DB
-    log_workflow(db, invoice_id, "store", "storing", "Persisting fields to database.")
-    try:
-        now = datetime.utcnow()
-        with db.cursor() as cur:
-            # Upsert invoice record
-            cur.execute("""
-                INSERT INTO invoices (id, filename, original_name, mime_type, file_size, uploaded_at, status)
-                VALUES (%s, %s, %s, %s, %s, %s, 'stored')
-                ON DUPLICATE KEY UPDATE status = 'stored'
-            """, (
-                invoice_id,
-                file_path.name,
-                file_path.name.split("_", 2)[-1],
-                mimetypes.guess_type(file_path.name)[0] or "application/octet-stream",
-                file_path.stat().st_size,
-                datetime.fromtimestamp(file_path.stat().st_mtime),
-            ))
-
-            # Remove old extracted fields if re-extracting
-            cur.execute("DELETE FROM invoice_fields WHERE invoice_id = %s", (invoice_id,))
-            cur.execute("""
-                INSERT INTO invoice_fields
-                  (invoice_id, invoice_number, invoice_date, due_date, vendor, bill_to,
-                   subtotal, tax, total, raw_text, extracted_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """, (
-                invoice_id,
-                fields.get("invoice_number"),
-                fields.get("date"),
-                fields.get("due_date"),
-                fields.get("vendor"),
-                fields.get("bill_to"),
-                fields.get("subtotal"),
-                fields.get("tax"),
-                fields.get("total"),
-                fields.get("raw_text", ""),
-                now,
-            ))
-
-            # Store line items
-            cur.execute("DELETE FROM invoice_line_items WHERE invoice_id = %s", (invoice_id,))
-            for item in fields.get("items", []):
-                cur.execute("""
-                    INSERT INTO invoice_line_items (invoice_id, description, quantity, unit_price, amount)
-                    VALUES (%s, %s, %s, %s, %s)
-                """, (
-                    invoice_id,
-                    item.get("description", ""),
-                    item.get("quantity"),
-                    item.get("unit_price"),
-                    item.get("amount"),
-                ))
-
-            # Store validation result
-            cur.execute("DELETE FROM invoice_validation WHERE invoice_id = %s", (invoice_id,))
-            cur.execute("""
-                INSERT INTO invoice_validation
-                  (invoice_id, is_valid, date_format_ok, amount_consistency_ok,
-                   gst_calculation_ok, total_match_ok, errors, validated_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-            """, (
-                invoice_id,
-                int(validation["is_valid"]),
-                int(validation["date_format_ok"]),
-                int(validation["amount_consistency_ok"]),
-                int(validation["gst_calculation_ok"]),
-                int(validation["total_match_ok"]),
-                "; ".join(validation.get("errors", [])),
-                now,
-            ))
-
-        db.commit()
-        log_workflow(db, invoice_id, "store", "stored", "All data persisted successfully.")
-    except Exception as exc:
-        db.rollback()
-        log_workflow(db, invoice_id, "store", "failed", str(exc))
-        return {"error": f"Storage failed: {exc}"}
-
-    # Return everything to the API caller
     return {
-        "fields": {
-            **fields,
-            "items": [
-                {
-                    "description": it.get("description", ""),
-                    "quantity": it.get("quantity"),
-                    "unit_price": it.get("unit_price"),
-                    "amount": it.get("amount"),
-                }
-                for it in fields.get("items", [])
-            ],
-        },
+        "invoice": invoice_meta,
+        "fields": fields,
         "validation": validation,
-        "workflow_status": validation_status,
+        "workflow_status": (wf or {}).get("status", ""),
+        "decision": decision,
     }
 
 
-# ── Routes ────────────────────────────────────────────────────────────────────
+def build_ml_features_snapshot(invoice_id: str, organization_id: int):
+    review = get_invoice_review_data(invoice_id, organization_id)
+    if not review:
+        return None
+    fields = review.get("fields") or {}
+    validation = review.get("validation") or {}
+    items = fields.get("items") or []
+    return {
+        "invoiceId": invoice_id,
+        "organizationId": organization_id,
+        "invoiceNumber": fields.get("invoice_number"),
+        "invoiceDate": fields.get("date"),
+        "dueDate": fields.get("due_date"),
+        "vendor": fields.get("vendor"),
+        "billTo": fields.get("bill_to"),
+        "subtotal": fields.get("subtotal"),
+        "tax": fields.get("tax"),
+        "total": fields.get("total"),
+        "lineItemCount": len(items),
+        "hasValidation": bool(validation),
+        "validation": validation,
+    }
+
+
+def _fetch_export_rows(db, organization_id: int, invoice_id=None):
+    return fetch_export_rows(db, organization_id, invoice_id)
+
+
+def _build_csv(rows):
+    return build_csv(rows)
+
+
+def _build_excel(rows):
+    return build_excel(rows)
+
 
 @app.route("/api/health", methods=["GET"])
 def health():
@@ -879,11 +634,66 @@ def login():
         cur.execute("UPDATE users SET last_login_at = %s WHERE id = %s", (now, user["id"]))
     db.commit()
 
-    return jsonify({
-        "token": token,
-        "expiresAt": expires_at.isoformat(),
-        "user": _serialize_user(user),
-    }), 200
+    return jsonify({"token": token, "expiresAt": expires_at.isoformat(), "user": _serialize_user(user)}), 200
+
+
+@app.route("/api/auth/signup", methods=["POST"])
+def signup():
+    payload = request.get_json(silent=True) or {}
+    full_name = (payload.get("fullName") or "").strip()
+    organization_name = (payload.get("organizationName") or "").strip()
+    email = (payload.get("email") or "").strip().lower()
+    password = payload.get("password") or ""
+
+    if not full_name or not organization_name or not email or not password:
+        return jsonify({"error": "Full name, organization name, email, and password are required."}), 400
+    if len(password) < 6:
+        return jsonify({"error": "Password must be at least 6 characters."}), 400
+
+    db = get_db()
+    try:
+        with db.cursor() as cur:
+            cur.execute("SELECT id FROM users WHERE email = %s LIMIT 1", (email,))
+            if cur.fetchone():
+                return jsonify({"error": "An account with this email already exists."}), 409
+
+            org_slug = _create_unique_org_slug(cur, organization_name)
+            now = datetime.utcnow()
+            cur.execute(
+                "INSERT INTO organizations (name, slug, created_at) VALUES (%s, %s, %s)",
+                (organization_name, org_slug, now),
+            )
+            org_id = cur.lastrowid
+
+            cur.execute(
+                """
+                INSERT INTO users (organization_id, full_name, email, password_hash, is_active, created_at, last_login_at)
+                VALUES (%s, %s, %s, %s, 1, %s, %s)
+                """,
+                (org_id, full_name, email, generate_password_hash(password), now, now),
+            )
+            user_id = cur.lastrowid
+
+            token = secrets.token_urlsafe(32)
+            expires_at = now + timedelta(hours=SESSION_TTL_HOURS)
+            cur.execute(
+                "INSERT INTO auth_sessions (user_id, token_hash, created_at, expires_at) VALUES (%s, %s, %s, %s)",
+                (user_id, _token_hash(token), now, expires_at),
+            )
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+    user = {
+        "id": user_id,
+        "full_name": full_name,
+        "email": email,
+        "organization_id": org_id,
+        "organization_name": organization_name,
+        "organization_slug": org_slug,
+    }
+    return jsonify({"token": token, "expiresAt": expires_at.isoformat(), "user": _serialize_user(user)}), 201
 
 
 @app.route("/api/auth/me", methods=["GET"])
@@ -938,13 +748,12 @@ def serve_invoice_file(invoice_id):
 def upload_invoice():
     if "invoice" not in request.files:
         return jsonify({"error": "No invoice file was provided."}), 400
+
     invoice_file = request.files["invoice"]
     if invoice_file.filename == "":
         return jsonify({"error": "Please choose an invoice file to upload."}), 400
     if not allowed_file(invoice_file.filename):
-        return jsonify(
-            {"error": "Only PDF, PNG, JPG, and JPEG invoice files are supported."}
-        ), 400
+        return jsonify({"error": "Only PDF, PNG, JPG, and JPEG invoice files are supported."}), 400
 
     safe_name = secure_filename(invoice_file.filename)
     stored_name = f"{datetime.now().strftime('%Y%m%d%H%M%S')}_{uuid4().hex}_{safe_name}"
@@ -955,34 +764,50 @@ def upload_invoice():
 
     db = get_db()
     with db.cursor() as cur:
-        cur.execute("""
+        cur.execute(
+            """
             INSERT IGNORE INTO invoices
               (id, organization_id, uploaded_by_user_id, filename, original_name, mime_type, file_size, uploaded_at, status)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'uploaded')
-        """, (
-            invoice_data["id"],
-            current_org_id(),
-            current_user_id(),
-            invoice_data["filename"],
-            invoice_data["originalName"],
-            invoice_data["mimeType"],
-            invoice_data["size"],
-            invoice_data["uploadedAt"],
-        ))
+            """,
+            (
+                invoice_data["id"],
+                current_org_id(),
+                current_user_id(),
+                invoice_data["filename"],
+                invoice_data["originalName"],
+                invoice_data["mimeType"],
+                invoice_data["size"],
+                invoice_data["uploadedAt"],
+            ),
+        )
     db.commit()
 
     log_workflow(db, invoice_data["id"], "upload", "uploaded", "File uploaded successfully.")
+    workflow_result = run_workflow(invoice_data["id"], target_path, db)
+    if "error" in workflow_result:
+        return jsonify(
+            {
+                "message": "Invoice uploaded, but auto-processing failed.",
+                "invoice": invoice_data,
+                "processingError": workflow_result["error"],
+            }
+        ), 202
 
-    return jsonify({"message": "Invoice uploaded successfully.", "invoice": invoice_data}), 201
+    return jsonify(
+        {
+            "message": "Invoice uploaded and processed successfully.",
+            "invoice": invoice_data,
+            "fields": workflow_result.get("fields"),
+            "validation": workflow_result.get("validation"),
+            "workflow_status": workflow_result.get("workflow_status"),
+        }
+    ), 201
 
 
 @app.route("/api/invoices/<invoice_id>/extract", methods=["POST"])
 @require_auth
 def extract_invoice(invoice_id):
-    """
-    Phase 6: Runs the full workflow (extract → validate → store) and returns results.
-    This replaces the old extract-only endpoint.
-    """
     invoice_row = get_invoice_row(invoice_id, current_org_id())
     file_path = get_invoice_file(invoice_row)
     if file_path is None:
@@ -990,17 +815,14 @@ def extract_invoice(invoice_id):
 
     db = get_db()
     result = run_workflow(invoice_id, file_path, db)
-
     if "error" in result:
         return jsonify(result), 500
-
     return jsonify(result), 200
 
 
 @app.route("/api/invoices/<invoice_id>/workflow", methods=["GET"])
 @require_auth
 def get_workflow_log(invoice_id):
-    """Return the workflow history for an invoice."""
     invoice_row = get_invoice_row(invoice_id, current_org_id())
     if invoice_row is None:
         return jsonify({"error": "Invoice not found."}), 404
@@ -1017,7 +839,6 @@ def get_workflow_log(invoice_id):
 @app.route("/api/invoices/<invoice_id>/validation", methods=["GET"])
 @require_auth
 def get_validation(invoice_id):
-    """Return the latest validation result for an invoice."""
     invoice_row = get_invoice_row(invoice_id, current_org_id())
     if invoice_row is None:
         return jsonify({"error": "Invoice not found."}), 404
@@ -1033,107 +854,90 @@ def get_validation(invoice_id):
     return jsonify({"validation": row}), 200
 
 
-# ── Phase 8: Export & Integration ────────────────────────────────────────────
+@app.route("/api/invoices/<invoice_id>/review", methods=["GET"])
+@require_auth
+def get_invoice_review(invoice_id):
+    data = get_invoice_review_data(invoice_id, current_org_id())
+    if not data:
+        return jsonify({"error": "Invoice not found."}), 404
+    return jsonify(data), 200
 
-EXPORT_COLUMNS = [
-    "invoice_id", "invoice_number", "invoice_date", "due_date",
-    "vendor", "bill_to", "subtotal", "tax", "total",
-]
 
+@app.route("/api/invoices/<invoice_id>/decision", methods=["POST"])
+@require_auth
+def set_invoice_decision(invoice_id):
+    invoice_row = get_invoice_row(invoice_id, current_org_id())
+    if invoice_row is None:
+        return jsonify({"error": "Invoice not found."}), 404
 
-def _fetch_export_rows(db, organization_id: int, invoice_id=None):
-    """Fetch invoice_fields rows for export. Optionally filter by one invoice."""
-    query = (
-        "SELECT f.invoice_id, f.invoice_number, f.invoice_date, f.due_date, "
-        "f.vendor, f.bill_to, f.subtotal, f.tax, f.total, "
-        "v.is_valid, v.date_format_ok, v.amount_consistency_ok, "
-        "v.gst_calculation_ok, v.total_match_ok "
-        "FROM invoice_fields f "
-        "JOIN invoices i ON i.id = f.invoice_id "
-        "LEFT JOIN invoice_validation v ON f.invoice_id = v.invoice_id "
-    )
-    params = [organization_id]
-    query += "WHERE i.organization_id = %s "
-    if invoice_id:
-        query += "AND f.invoice_id = %s "
-        params.append(invoice_id)
-    query += "ORDER BY f.extracted_at DESC"
+    payload = request.get_json(silent=True) or {}
+    decision = (payload.get("decision") or "").strip().lower()
+    reason = (payload.get("reason") or "").strip()
+    confidence_score = payload.get("confidenceScore")
+
+    if decision not in {"approved", "rejected"}:
+        return jsonify({"error": "Decision must be 'approved' or 'rejected'."}), 400
+    if decision == "rejected" and not reason:
+        return jsonify({"error": "Reason is required when rejecting an invoice."}), 400
+
+    if confidence_score is not None:
+        try:
+            confidence_score = float(confidence_score)
+        except (TypeError, ValueError):
+            return jsonify({"error": "confidenceScore must be a number between 0 and 100."}), 400
+        if confidence_score < 0 or confidence_score > 100:
+            return jsonify({"error": "confidenceScore must be between 0 and 100."}), 400
+
+    db = get_db()
+    now = datetime.utcnow()
     with db.cursor() as cur:
-        cur.execute(query, tuple(params))
-        return cur.fetchall()
+        cur.execute(
+            """
+            INSERT INTO invoice_decisions
+              (invoice_id, organization_id, reviewer_user_id, decision, reason, confidence_score, decided_at, updated_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE
+              decision = VALUES(decision),
+              reason = VALUES(reason),
+              confidence_score = VALUES(confidence_score),
+              reviewer_user_id = VALUES(reviewer_user_id),
+              updated_at = VALUES(updated_at)
+            """,
+            (
+                invoice_id,
+                current_org_id(),
+                current_user_id(),
+                decision,
+                reason,
+                confidence_score,
+                now,
+                now,
+            ),
+        )
 
+    features = build_ml_features_snapshot(invoice_id, current_org_id()) or {}
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO ml_training_samples (invoice_id, organization_id, label, features_json, created_at)
+            VALUES (%s, %s, %s, %s, %s)
+            """,
+            (
+                invoice_id,
+                current_org_id(),
+                decision,
+                json.dumps(features, default=str),
+                now,
+            ),
+        )
+    db.commit()
 
-def _build_csv(rows):
-    """Build a CSV string from export rows."""
-    output = io.StringIO()
-    all_cols = EXPORT_COLUMNS + ["is_valid", "date_format_ok", "amount_consistency_ok",
-                                  "gst_calculation_ok", "total_match_ok"]
-    writer = csv.DictWriter(output, fieldnames=all_cols, extrasaction="ignore")
-    writer.writeheader()
-    for row in rows:
-        writer.writerow(row)
-    return output.getvalue()
-
-
-def _build_excel(rows):
-    """Build an Excel (.xlsx) workbook in memory from export rows."""
-    from openpyxl import Workbook
-    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Invoices"
-
-    all_cols = EXPORT_COLUMNS + ["is_valid", "date_format_ok", "amount_consistency_ok",
-                                  "gst_calculation_ok", "total_match_ok"]
-    # Header style
-    header_font = Font(bold=True, color="FFFFFF", size=11)
-    header_fill = PatternFill(start_color="2E3440", end_color="2E3440", fill_type="solid")
-    header_align = Alignment(horizontal="center", vertical="center")
-    thin_border = Border(
-        left=Side(style="thin"),
-        right=Side(style="thin"),
-        top=Side(style="thin"),
-        bottom=Side(style="thin"),
-    )
-
-    # Write header
-    for col_idx, col_name in enumerate(all_cols, 1):
-        cell = ws.cell(row=1, column=col_idx, value=col_name.replace("_", " ").title())
-        cell.font = header_font
-        cell.fill = header_fill
-        cell.alignment = header_align
-        cell.border = thin_border
-
-    # Write data rows
-    for row_idx, row_data in enumerate(rows, 2):
-        for col_idx, col_name in enumerate(all_cols, 1):
-            val = row_data.get(col_name)
-            # Convert Decimal to float for Excel
-            if hasattr(val, "as_tuple"):  # Decimal check
-                val = float(val)
-            cell = ws.cell(row=row_idx, column=col_idx, value=val)
-            cell.border = thin_border
-            cell.alignment = Alignment(horizontal="center")
-
-    # Auto-width columns
-    for col_idx, col_name in enumerate(all_cols, 1):
-        max_len = max(len(col_name), 12)
-        for row_data in rows:
-            cell_val = str(row_data.get(col_name, "") or "")
-            max_len = max(max_len, len(cell_val))
-        ws.column_dimensions[ws.cell(row=1, column=col_idx).column_letter].width = min(max_len + 4, 40)
-
-    buf = io.BytesIO()
-    wb.save(buf)
-    buf.seek(0)
-    return buf
+    return jsonify({"message": f"Invoice marked as {decision}.", "decision": decision}), 200
 
 
 @app.route("/api/invoices/<invoice_id>/export/csv", methods=["GET"])
 @require_auth
 def export_invoice_csv(invoice_id):
-    """Phase 8: Export a single invoice's extracted data as CSV."""
     invoice_row = get_invoice_row(invoice_id, current_org_id())
     if invoice_row is None:
         return jsonify({"error": "Invoice not found."}), 404
@@ -1145,7 +949,9 @@ def export_invoice_csv(invoice_id):
     buf = io.BytesIO(csv_text.encode("utf-8"))
     buf.seek(0)
     return send_file(
-        buf, mimetype="text/csv", as_attachment=True,
+        buf,
+        mimetype="text/csv",
+        as_attachment=True,
         download_name=f"invoice_{invoice_id}.csv",
     )
 
@@ -1153,7 +959,6 @@ def export_invoice_csv(invoice_id):
 @app.route("/api/invoices/<invoice_id>/export/excel", methods=["GET"])
 @require_auth
 def export_invoice_excel(invoice_id):
-    """Phase 8: Export a single invoice's extracted data as Excel."""
     invoice_row = get_invoice_row(invoice_id, current_org_id())
     if invoice_row is None:
         return jsonify({"error": "Invoice not found."}), 404
@@ -1163,15 +968,16 @@ def export_invoice_excel(invoice_id):
         return jsonify({"error": "No extracted data found for this invoice."}), 404
     buf = _build_excel(rows)
     return send_file(
-        buf, mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        as_attachment=True, download_name=f"invoice_{invoice_id}.xlsx",
+        buf,
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        as_attachment=True,
+        download_name=f"invoice_{invoice_id}.xlsx",
     )
 
 
 @app.route("/api/export/csv", methods=["GET"])
 @require_auth
 def export_all_csv():
-    """Phase 8: Export ALL extracted invoices as a single CSV file."""
     db = get_db()
     rows = _fetch_export_rows(db, current_org_id())
     if not rows:
@@ -1180,7 +986,9 @@ def export_all_csv():
     buf = io.BytesIO(csv_text.encode("utf-8"))
     buf.seek(0)
     return send_file(
-        buf, mimetype="text/csv", as_attachment=True,
+        buf,
+        mimetype="text/csv",
+        as_attachment=True,
         download_name="all_invoices.csv",
     )
 
@@ -1188,15 +996,16 @@ def export_all_csv():
 @app.route("/api/export/excel", methods=["GET"])
 @require_auth
 def export_all_excel():
-    """Phase 8: Export ALL extracted invoices as a single Excel file."""
     db = get_db()
     rows = _fetch_export_rows(db, current_org_id())
     if not rows:
         return jsonify({"error": "No extracted data found."}), 404
     buf = _build_excel(rows)
     return send_file(
-        buf, mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        as_attachment=True, download_name="all_invoices.xlsx",
+        buf,
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        as_attachment=True,
+        download_name="all_invoices.xlsx",
     )
 
 

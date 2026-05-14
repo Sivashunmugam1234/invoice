@@ -20,7 +20,21 @@ export default function ExtractedFieldsPanel({
       </div>
 
       {extractError ? (
-        <div className="mt-3 px-3.5 py-2.5 rounded-[10px] text-[0.82rem] bg-red-dim text-red border border-red/30 animate-slideIn">x {extractError}</div>
+        <div className="space-y-3">
+          <div className="px-3.5 py-2.5 rounded-[10px] text-[0.82rem] bg-red-dim text-red border border-red/30 animate-slideIn">x {extractError}</div>
+          {extractError.includes('Tesseract') && (
+            <div className="px-3.5 py-3 rounded-[10px] text-[0.8rem] bg-blue-dim text-blue border border-blue/30">
+              <p className="font-semibold mb-2">Fix: Install Tesseract-OCR</p>
+              <p className="mb-2">For image/screenshot extraction, you need Tesseract-OCR:</p>
+              <ul className="list-disc list-inside space-y-1 text-[0.75rem]">
+                <li><strong>Windows:</strong> Download from <a href="https://github.com/UB-Mannheim/tesseract/wiki" target="_blank" rel="noopener noreferrer" className="underline">tesseract wiki</a></li>
+                <li><strong>macOS:</strong> <code className="bg-bg3 px-1 rounded">brew install tesseract</code></li>
+                <li><strong>Linux:</strong> <code className="bg-bg3 px-1 rounded">sudo apt-get install tesseract-ocr</code></li>
+              </ul>
+              <p className="mt-2 text-[0.75rem]">After installation, restart the backend server.</p>
+            </div>
+          )}
+        </div>
       ) : (
         <>
           <dl className="grid grid-cols-[repeat(auto-fill,minmax(210px,1fr))] gap-2.5 mb-7 max-[680px]:grid-cols-2">
