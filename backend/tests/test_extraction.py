@@ -137,10 +137,7 @@ class TestDateValidation:
 #  Test Group 4: Field Extraction (Regex Patterns)
 # ═══════════════════════════════════════════════════════════════
 
-# A sample invoice text that matches all patterns perfectly
-# NOTE: The 'total' regex also matches 'Subtotal' because it contains 'total'.
-# To ensure correct extraction, 'Total Amount' must appear BEFORE 'Subtotal'
-# is matched, or we test against the actual behavior of the regex.
+# A sample invoice text that matches all patterns perfectly.
 PERFECT_INVOICE = """
 Vendor: TechCorp Solutions Pvt Ltd
 Bill To: Acme Corp Industries
@@ -192,11 +189,17 @@ class TestFieldExtraction:
 
     def test_total_extracted(self):
         fields = extract_fields_from_text(PERFECT_INVOICE)
-        # The 'total' regex matches broadly — it will find the first
-        # occurrence of 'total' in the text (which may be 'Subtotal').
-        # We verify that a total value was extracted (non-None).
-        assert fields.get("total") is not None
-        assert fields.get("total") > 0
+        assert fields.get("total") == 1180.00
+
+    def test_tax_extracted_with_percent_label(self):
+        text = """
+        Subtotal: 36037.06
+        GST (18%): 6486.67
+        Total Amount: 42523.73
+        """
+        fields = extract_fields_from_text(text)
+        assert fields.get("tax") == 6486.67
+        assert fields.get("total") == 42523.73
 
     def test_raw_text_preserved(self):
         fields = extract_fields_from_text(PERFECT_INVOICE)
@@ -393,6 +396,30 @@ class TestDifferentFormats:
         fields = extract_fields_from_text(text)
         assert fields.get("total") == 500.0
 
+    def test_invoice_header_with_from_and_bill_to_blocks(self):
+        text = """
+        INVOICE
+        NO. INV-2026-064     DATE 19/01/2025     DUE DATE 02/02/2025
+        FROM
+        Infosys Digital Services
+        India
+        BILL TO
+        Reliance Systems Ltd
+        India
+
+        API Integration Services 5 Rs. 1,039.98 Rs. 5,199.90
+        IT Consulting Services 2 Rs. 2,172.85 Rs. 4,345.70
+        """
+        fields = extract_fields_from_text(text)
+        assert fields.get("invoice_number") == "INV-2026-064"
+        assert fields.get("date") == "19/01/2025"
+        assert fields.get("due_date") == "02/02/2025"
+        assert fields.get("vendor") == "Infosys Digital Services"
+        assert fields.get("bill_to") == "Reliance Systems Ltd"
+        assert fields.get("subtotal") == 9545.6
+        assert fields.get("total") == 9545.6
+        assert len(fields.get("items", [])) >= 2
+
     def test_grand_total_label(self):
         """Grand Total style label."""
         text = "Invoice No: GT-001\nDate: 01/01/2026\nGrand Total: 2500.00"
@@ -484,6 +511,7 @@ class TestRegexPatterns:
         assert pattern.search("Tax: 180.00")
         assert pattern.search("VAT: 200.00")
         assert pattern.search("GST: 180.00")
+        assert pattern.search("GST (18%): 180.00")
         assert pattern.search("CGST: 90.00")
         assert pattern.search("SGST: 90.00")
         assert pattern.search("IGST: 180.00")
@@ -495,6 +523,7 @@ class TestRegexPatterns:
         assert pattern.search("Grand Total: 1180.00")
         assert pattern.search("Amount Due: 1180.00")
         assert pattern.search("Balance Due: 1180.00")
+        assert not pattern.search("Subtotal: 1000.00")
 
     def test_subtotal_pattern(self):
         pattern = FIELD_PATTERNS["subtotal"]

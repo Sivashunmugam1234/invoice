@@ -1,77 +1,95 @@
 import { useEffect, useRef, useState } from 'react'
-import './App.css'
+import AuthView from './components/AuthView'
+import DashboardHeader from './components/DashboardHeader'
+import UploadPanel from './components/UploadPanel'
+import InvoiceListPanel from './components/InvoiceListPanel'
+import PreviewPanel from './components/PreviewPanel'
+import { withToken } from './utils/invoiceUi'
 
-/* ── Helpers ─────────────────────────────────────────────── */
-
-function formatSize(bytes) {
-  if (bytes < 1024) return `${bytes} B`
-  const kb = bytes / 1024
-  if (kb < 1024) return `${kb.toFixed(1)} KB`
-  return `${(kb / 1024).toFixed(1)} MB`
-}
-
-function formatDate(value) {
-  return new Date(value).toLocaleString('en-IN', {
-    day: '2-digit', month: 'short', year: 'numeric',
-    hour: '2-digit', minute: '2-digit',
-  })
-}
-
-function fileIcon(mimeType) {
-  if (!mimeType) return '📄'
-  if (mimeType === 'application/pdf') return '📕'
-  if (mimeType.startsWith('image/')) return '🖼️'
-  return '📄'
-}
-
-const AMOUNT_KEYS = new Set(['subtotal', 'tax', 'total'])
-
-const FIELD_LABELS = {
-  invoice_number: 'Invoice No.',
-  date:           'Invoice Date',
-  due_date:       'Due Date',
-  vendor:         'Vendor',
-  bill_to:        'Bill To',
-  subtotal:       'Subtotal',
-  tax:            'Tax / GST',
-  total:          'Total Amount',
-}
-
-const VALIDATION_LABELS = {
-  date_format_ok:        'Date Format',
-  amount_consistency_ok: 'Amount Consistency',
-  gst_calculation_ok:    'GST Calculation',
-  total_match_ok:        'Total Match',
-}
-
-/* ── App ─────────────────────────────────────────────────── */
+const TOKEN_KEY = 'invoice_auth_token'
 
 export default function App() {
-  const [selectedFile, setSelectedFile]       = useState(null)
-  const [dragOver, setDragOver]               = useState(false)
-  const [invoices, setInvoices]               = useState([])
+  const [authToken, setAuthToken] = useState(() => localStorage.getItem(TOKEN_KEY) || '')
+  const [authUser, setAuthUser] = useState(null)
+  const [authLoading, setAuthLoading] = useState(true)
+  const [authMode, setAuthMode] = useState('signin')
+  const [loginEmail, setLoginEmail] = useState('')
+  const [loginPassword, setLoginPassword] = useState('')
+  const [loginError, setLoginError] = useState('')
+  const [isLoggingIn, setIsLoggingIn] = useState(false)
+  const [signupFullName, setSignupFullName] = useState('')
+  const [signupOrgName, setSignupOrgName] = useState('')
+  const [signupEmail, setSignupEmail] = useState('')
+  const [signupPassword, setSignupPassword] = useState('')
+  const [signupConfirmPassword, setSignupConfirmPassword] = useState('')
+  const [signupError, setSignupError] = useState('')
+  const [isSigningUp, setIsSigningUp] = useState(false)
+
+  const [selectedFile, setSelectedFile] = useState(null)
+  const [invoices, setInvoices] = useState([])
   const [activeInvoiceId, setActiveInvoiceId] = useState('')
-  const [message, setMessage]                 = useState('')
-  const [error, setError]                     = useState('')
-  const [isLoading, setIsLoading]             = useState(true)
-  const [isUploading, setIsUploading]         = useState(false)
+  const [message, setMessage] = useState('')
+  const [error, setError] = useState('')
+  const [isLoading, setIsLoading] = useState(true)
+  const [isUploading, setIsUploading] = useState(false)
   const [extractedFields, setExtractedFields] = useState(null)
   const [validationResult, setValidationResult] = useState(null)
-  const [workflowStatus, setWorkflowStatus]   = useState('')
-  const [isExtracting, setIsExtracting]       = useState(false)
-  const [extractError, setExtractError]       = useState('')
+  const [workflowStatus, setWorkflowStatus] = useState('')
+  const [isExtracting, setIsExtracting] = useState(false)
+  const [extractError, setExtractError] = useState('')
+  const [reviewDecision, setReviewDecision] = useState(null)
+  const [decisionReason, setDecisionReason] = useState('')
+  const [isSavingDecision, setIsSavingDecision] = useState(false)
+  const [decisionError, setDecisionError] = useState('')
+  const [decisionMessage, setDecisionMessage] = useState('')
   const fileInputRef = useRef(null)
 
   const activeInvoice =
     invoices.find(inv => inv.id === activeInvoiceId) ?? invoices[0] ?? null
+  const reviewedCount = invoices.filter(inv => Boolean(inv.decision)).length
+  const pendingReviewCount = invoices.length - reviewedCount
 
-  const storedCount = invoices.filter(inv => inv.status === 'stored').length
+  function resetExtractionView() {
+    setExtractedFields(null)
+    setValidationResult(null)
+    setWorkflowStatus('')
+    setExtractError('')
+    setReviewDecision(null)
+    setDecisionReason('')
+    setDecisionError('')
+    setDecisionMessage('')
+  }
 
-  /* ── Data fetching ── */
+  function resetAppState() {
+    setInvoices([])
+    setActiveInvoiceId('')
+    setSelectedFile(null)
+    resetExtractionView()
+    setMessage('')
+    setError('')
+  }
+
+  function clearSession() {
+    localStorage.removeItem(TOKEN_KEY)
+    setAuthToken('')
+    setAuthUser(null)
+    resetAppState()
+  }
+
+  async function authFetch(url, options = {}) {
+    const headers = new Headers(options.headers || {})
+    if (authToken) headers.set('Authorization', `Bearer ${authToken}`)
+    const res = await fetch(url, { ...options, headers })
+    if (res.status === 401 && authToken) {
+      clearSession()
+      throw new Error('Your session expired. Please login again.')
+    }
+    return res
+  }
 
   async function fetchInvoices() {
     try {
-      const res = await fetch('/api/invoices')
+      const res = await authFetch('/api/invoices')
       if (!res.ok) throw new Error('Could not load invoices.')
       const data = await res.json()
       const next = data.invoices ?? []
@@ -88,25 +106,163 @@ export default function App() {
   }
 
   useEffect(() => {
+    if (!authToken) {
+      setAuthLoading(false)
+      return
+    }
+    ;(async () => {
+      try {
+        const res = await fetch('/api/auth/me', {
+          headers: { Authorization: `Bearer ${authToken}` },
+        })
+        if (!res.ok) throw new Error('Invalid session')
+        const data = await res.json()
+        setAuthUser(data.user)
+      } catch {
+        clearSession()
+      } finally {
+        setAuthLoading(false)
+      }
+    })()
+  }, [authToken])
+
+  useEffect(() => {
+    if (!authUser) return
+    setIsLoading(true)
     fetchInvoices().finally(() => setIsLoading(false))
-  }, [])
+  }, [authUser])
 
-  /* ── Upload ── */
+  useEffect(() => {
+    if (!authUser || !activeInvoiceId) return
+    ;(async () => {
+      try {
+        const res = await authFetch(`/api/invoices/${activeInvoiceId}/review`)
+        if (!res.ok) throw new Error('Could not load invoice review data.')
+        const data = await res.json()
+        setExtractedFields(data.fields ?? null)
+        setValidationResult(data.validation ?? null)
+        setWorkflowStatus(data.workflow_status ?? '')
+        setReviewDecision(data.decision ?? null)
+        setDecisionReason(data.decision?.reason ?? '')
+        setExtractError('')
+      } catch (e) {
+        setExtractError(e.message)
+      }
+    })()
+  }, [authUser, activeInvoiceId])
 
-  async function handleSubmit(e) {
+  async function handleLogin(e) {
     e.preventDefault()
-    if (!selectedFile) { setError('Choose an invoice file first.'); return }
+    if (!loginEmail || !loginPassword) {
+      setLoginError('Enter email and password.')
+      return
+    }
+    setIsLoggingIn(true)
+    setLoginError('')
+    try {
+      const res = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: loginEmail, password: loginPassword }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error || 'Login failed.')
+      localStorage.setItem(TOKEN_KEY, data.token)
+      setAuthToken(data.token)
+      setAuthUser(data.user)
+      setLoginPassword('')
+    } catch (e) {
+      setLoginError(e.message)
+    } finally {
+      setIsLoggingIn(false)
+    }
+  }
+
+  async function handleSignup(e) {
+    e.preventDefault()
+    if (!signupFullName || !signupOrgName || !signupEmail || !signupPassword || !signupConfirmPassword) {
+      setSignupError('Please fill all sign up fields.')
+      return
+    }
+    if (signupPassword !== signupConfirmPassword) {
+      setSignupError('Passwords do not match.')
+      return
+    }
+    setIsSigningUp(true)
+    setSignupError('')
+    try {
+      const res = await fetch('/api/auth/signup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          fullName: signupFullName,
+          organizationName: signupOrgName,
+          email: signupEmail,
+          password: signupPassword,
+        }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error || 'Sign up failed.')
+      localStorage.setItem(TOKEN_KEY, data.token)
+      setAuthToken(data.token)
+      setAuthUser(data.user)
+      setSignupPassword('')
+      setSignupConfirmPassword('')
+    } catch (e) {
+      setSignupError(e.message)
+    } finally {
+      setIsSigningUp(false)
+    }
+  }
+
+  async function handleLogout() {
+    try {
+      await authFetch('/api/auth/logout', { method: 'POST' })
+    } catch {
+      // no-op
+    } finally {
+      clearSession()
+    }
+  }
+
+  function handleFilePick(file) {
+    if (!file) return
+    setSelectedFile(file)
+    setError('')
+    setMessage('')
+  }
+
+  async function handleUpload(e) {
+    e.preventDefault()
+    if (!selectedFile) {
+      setError('Choose an invoice file first.')
+      return
+    }
     const fd = new FormData()
     fd.append('invoice', selectedFile)
-    setIsUploading(true); setError(''); setMessage('')
+    setIsUploading(true)
+    setError('')
+    setMessage('')
     try {
-      const res  = await fetch('/api/invoices', { method: 'POST', body: fd })
+      const res = await authFetch('/api/invoices', { method: 'POST', body: fd })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error || 'Upload failed.')
-      setMessage(`${data.invoice.originalName} uploaded.`)
+      setMessage(data.message || `${data.invoice.originalName} uploaded.`)
       setSelectedFile(null)
       setActiveInvoiceId(data.invoice.id)
       if (fileInputRef.current) fileInputRef.current.value = ''
+      if (data.fields) {
+        setExtractedFields(data.fields)
+      }
+      if (data.validation) {
+        setValidationResult(data.validation)
+      }
+      if (data.workflow_status) {
+        setWorkflowStatus(data.workflow_status)
+      }
+      if (data.processingError) {
+        setExtractError(data.processingError)
+      }
       await fetchInvoices()
     } catch (e) {
       setError(e.message)
@@ -115,27 +271,20 @@ export default function App() {
     }
   }
 
-  function handleFilePick(file) {
-    if (!file) return
-    setSelectedFile(file)
-    setError(''); setMessage('')
-  }
-
-  /* ── Extract ── */
-
   async function handleExtract() {
     if (!activeInvoice) return
     setIsExtracting(true)
-    setExtractedFields(null); setValidationResult(null)
-    setWorkflowStatus(''); setExtractError('')
+    setExtractError('')
+    setDecisionError('')
+    setDecisionMessage('')
     try {
-      const res  = await fetch(`/api/invoices/${activeInvoice.id}/extract`, { method: 'POST' })
+      const res = await authFetch(`/api/invoices/${activeInvoice.id}/extract`, { method: 'POST' })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error || 'Extraction failed.')
       setExtractedFields(data.fields)
       setValidationResult(data.validation ?? null)
       setWorkflowStatus(data.workflow_status ?? '')
-      // refresh list so status dots update
+      setReviewDecision(null)
       fetchInvoices()
     } catch (e) {
       setExtractError(e.message)
@@ -144,307 +293,191 @@ export default function App() {
     }
   }
 
-  /* ── Preview ── */
+  async function downloadFile(url, fallbackName) {
+    try {
+      const res = await authFetch(url)
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        throw new Error(data.error || 'Download failed.')
+      }
+      const blob = await res.blob()
+      const downloadUrl = window.URL.createObjectURL(blob)
+      const anchor = document.createElement('a')
+      anchor.href = downloadUrl
+      anchor.download = fallbackName
+      document.body.appendChild(anchor)
+      anchor.click()
+      anchor.remove()
+      window.URL.revokeObjectURL(downloadUrl)
+    } catch (e) {
+      setError(e.message)
+    }
+  }
 
-  function renderPreview() {
-    if (!activeInvoice) return (
-      <div className="preview-empty">
-        <span className="preview-empty-icon">📂</span>
-        <span className="preview-empty-text">no document selected</span>
-      </div>
-    )
-    if (activeInvoice.mimeType === 'application/pdf') return (
-      <iframe key={activeInvoice.id} className="document-frame"
-        src={activeInvoice.previewUrl} title={activeInvoice.originalName} />
-    )
-    if (activeInvoice.mimeType?.startsWith('image/')) return (
-      <img key={activeInvoice.id} className="document-image"
-        src={activeInvoice.previewUrl} alt={activeInvoice.originalName} />
-    )
+  function handleSelectInvoice(invoiceId) {
+    setActiveInvoiceId(invoiceId)
+    setDecisionMessage('')
+    setDecisionError('')
+  }
+
+  function handleOpenInvoiceInNewTab(invoice) {
+    if (!invoice) return
+    const url = withToken(invoice.previewUrl, authToken)
+    window.open(url, '_blank', 'noopener,noreferrer')
+  }
+
+  async function saveDecision(decision) {
+    if (!activeInvoice) return
+    setIsSavingDecision(true)
+    setDecisionError('')
+    setDecisionMessage('')
+    try {
+      const res = await authFetch(`/api/invoices/${activeInvoice.id}/decision`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          decision,
+          reason: decisionReason,
+        }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error || 'Could not save decision.')
+      setDecisionMessage(data.message || `Invoice marked as ${decision}.`)
+      setReviewDecision({
+        decision,
+        reason: decisionReason,
+      })
+      fetchInvoices()
+    } catch (e) {
+      setDecisionError(e.message)
+    } finally {
+      setIsSavingDecision(false)
+    }
+  }
+
+  function handleApprove() {
+    saveDecision('approved')
+  }
+
+  function handleReject() {
+    saveDecision('rejected')
+  }
+
+  if (authLoading || !authUser) {
     return (
-      <div className="preview-empty">
-        <span className="preview-empty-icon">🚫</span>
-        <span className="preview-empty-text">preview unavailable</span>
-      </div>
+      <AuthView
+        authLoading={authLoading}
+        authMode={authMode}
+        loginEmail={loginEmail}
+        loginPassword={loginPassword}
+        loginError={loginError}
+        isLoggingIn={isLoggingIn}
+        signupFullName={signupFullName}
+        signupOrgName={signupOrgName}
+        signupEmail={signupEmail}
+        signupPassword={signupPassword}
+        signupConfirmPassword={signupConfirmPassword}
+        signupError={signupError}
+        isSigningUp={isSigningUp}
+        setLoginEmail={setLoginEmail}
+        setLoginPassword={setLoginPassword}
+        setSignupFullName={setSignupFullName}
+        setSignupOrgName={setSignupOrgName}
+        setSignupEmail={setSignupEmail}
+        setSignupPassword={setSignupPassword}
+        setSignupConfirmPassword={setSignupConfirmPassword}
+        setAuthMode={setAuthMode}
+        onLogin={handleLogin}
+        onSignup={handleSignup}
+      />
     )
   }
 
-  /* ── Render ── */
-
   return (
-    <main className="dashboard">
+    <main className="flex flex-col gap-4 animate-fadeUp">
+      <DashboardHeader
+        authUser={authUser}
+        invoicesCount={invoices.length}
+        storedCount={reviewedCount}
+        onLogout={handleLogout}
+      />
 
-      {/* ── Header ── */}
-      <header className="top-bar">
-        <div className="top-bar-left">
-          <p className="eyebrow">Invoice Intelligence</p>
-          <h1>Extract. Validate. <em>Store.</em></h1>
-          <p className="subtitle">
-            Upload PDF or image invoices — OCR extracts key fields, validates amounts, and persists everything to your database automatically.
-          </p>
+      <section className="bg-bg2 border border-border rounded-2xl p-4 grid grid-cols-[repeat(3,minmax(120px,1fr))_auto] gap-3 items-stretch max-xl:grid-cols-2 max-sm:grid-cols-1">
+        <article className="rounded-xl border border-border bg-bg3 px-4 py-3">
+          <p className="text-[0.72rem] uppercase tracking-[0.12em] text-text-3 font-mono">Uploaded</p>
+          <p className="text-[1.5rem] font-semibold text-text mt-1">{invoices.length}</p>
+        </article>
+        <article className="rounded-xl border border-border bg-bg3 px-4 py-3">
+          <p className="text-[0.72rem] uppercase tracking-[0.12em] text-text-3 font-mono">Processed</p>
+          <p className="text-[1.5rem] font-semibold text-text mt-1">{reviewedCount}</p>
+        </article>
+        <article className="rounded-xl border border-border bg-bg3 px-4 py-3">
+          <p className="text-[0.72rem] uppercase tracking-[0.12em] text-text-3 font-mono">Pending Review</p>
+          <p className="text-[1.5rem] font-semibold text-text mt-1">{pendingReviewCount}</p>
+        </article>
+        <div className="flex items-center gap-2 justify-end max-xl:col-span-2 max-xl:justify-start max-sm:col-span-1">
+          <button
+            type="button"
+            className="px-3.5 py-2 rounded-xl border border-border-hi bg-transparent text-text-2 text-[0.8rem] font-medium transition hover:border-gold hover:text-gold hover:bg-gold-dim"
+            onClick={() => downloadFile('/api/export/csv', 'all_invoices.csv')}
+          >
+            Export CSV
+          </button>
+          <button
+            type="button"
+            className="px-3.5 py-2 rounded-xl border border-border-hi bg-transparent text-text-2 text-[0.8rem] font-medium transition hover:border-gold hover:text-gold hover:bg-gold-dim"
+            onClick={() => downloadFile('/api/export/excel', 'all_invoices.xlsx')}
+          >
+            Export Excel
+          </button>
+        </div>
+      </section>
+
+      <div className="grid gap-4 grid-cols-[320px_360px_minmax(0,1fr)] items-start max-[1280px]:grid-cols-[300px_minmax(0,1fr)] max-[960px]:grid-cols-1">
+        <div className="flex flex-col gap-4 max-[1280px]:col-span-1">
+          <UploadPanel
+            selectedFile={selectedFile}
+            onFilePick={handleFilePick}
+            message={message}
+            error={error}
+            isUploading={isUploading}
+            onSubmit={handleUpload}
+            fileInputRef={fileInputRef}
+          />
         </div>
 
-        <div className="top-bar-stats">
-          <div className="stat-chip">
-            <span className="stat-number">{invoices.length}</span>
-            <span className="stat-label">Uploaded</span>
-          </div>
-          <div className="stat-chip">
-            <span className="stat-number">{storedCount}</span>
-            <span className="stat-label">Processed</span>
-          </div>
-          <div className="stat-chip">
-            <span className="stat-number">{invoices.length - storedCount}</span>
-            <span className="stat-label">Pending</span>
-          </div>
+        <div className="max-[1280px]:order-3">
+          <InvoiceListPanel
+            invoices={invoices}
+            isLoading={isLoading}
+            activeInvoiceId={activeInvoice?.id}
+            onSelectInvoice={handleSelectInvoice}
+            onOpenInvoice={handleOpenInvoiceInNewTab}
+          />
         </div>
 
-        {storedCount > 0 && (
-          <div className="export-bar">
-            <span className="export-bar-label">Export All</span>
-            <button type="button" className="export-btn" onClick={() => window.open('/api/export/csv', '_blank')}>📄 CSV</button>
-            <button type="button" className="export-btn" onClick={() => window.open('/api/export/excel', '_blank')}>📊 Excel</button>
-          </div>
-        )}
-      </header>
-
-      <div className="dashboard-grid">
-
-        {/* ── Upload Panel ── */}
-        <aside className="panel">
-          <p className="panel-title">Upload Invoice</p>
-
-          <form onSubmit={handleSubmit}>
-            {/* Drop zone */}
-            <div
-              className={`drop-zone${dragOver ? ' drag-over' : ''}`}
-              onDragOver={e => { e.preventDefault(); setDragOver(true) }}
-              onDragLeave={() => setDragOver(false)}
-              onDrop={e => {
-                e.preventDefault(); setDragOver(false)
-                handleFilePick(e.dataTransfer.files?.[0])
-              }}
-              onClick={() => fileInputRef.current?.click()}
-            >
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept=".pdf,.png,.jpg,.jpeg"
-                style={{ display: 'none' }}
-                onChange={e => handleFilePick(e.target.files?.[0])}
-              />
-              <span className="drop-icon">⬆</span>
-              <p className="drop-label">
-                <strong>Click to browse</strong> or drag & drop
-              </p>
-              <p className="drop-formats">PDF · PNG · JPG · JPEG</p>
-            </div>
-
-            {/* Selected file preview */}
-            {selectedFile && (
-              <div className="selected-file">
-                <span className="selected-file-icon">
-                  {selectedFile.type === 'application/pdf' ? '📕' : '🖼️'}
-                </span>
-                <div className="selected-file-info">
-                  <div className="selected-file-name">{selectedFile.name}</div>
-                  <div className="selected-file-size">{formatSize(selectedFile.size)}</div>
-                </div>
-              </div>
-            )}
-
-            <button
-              type="submit"
-              className={`upload-btn${isUploading ? ' uploading' : ''}`}
-              disabled={isUploading || !selectedFile}
-            >
-              {isUploading && <span className="btn-progress" />}
-              <span style={{ position: 'relative', zIndex: 1 }}>
-                {isUploading ? 'Uploading…' : 'Upload Invoice'}
-              </span>
-            </button>
-          </form>
-
-          {message && <div className="toast toast--success">✓ {message}</div>}
-          {error   && <div className="toast toast--error">✕ {error}</div>}
-        </aside>
-
-        {/* ── Invoice List Panel ── */}
-        <section className="panel">
-          <div className="list-header">
-            <p className="panel-title" style={{ margin: 0 }}>Documents</p>
-            <span className="count-badge">{invoices.length}</span>
-          </div>
-
-          {isLoading ? (
-            <div className="loading-shimmer">
-              {[0, 1, 2].map(i => <div key={i} className="shimmer-row" style={{ animationDelay: `${i * 0.1}s` }} />)}
-            </div>
-          ) : invoices.length === 0 ? (
-            <p className="empty-state">no invoices uploaded yet</p>
-          ) : (
-            <ul className="invoice-list">
-              {invoices.map(inv => (
-                <li key={inv.id}>
-                  <button
-                    type="button"
-                    className={`invoice-item${inv.id === activeInvoice?.id ? ' invoice-item-active' : ''}`}
-                    onClick={() => {
-                      setActiveInvoiceId(inv.id)
-                      setExtractedFields(null); setValidationResult(null)
-                      setWorkflowStatus(''); setExtractError('')
-                    }}
-                  >
-                    <span className="invoice-name">
-                      {fileIcon(inv.mimeType)}&nbsp; {inv.originalName}
-                    </span>
-                    <span className="invoice-meta">
-                      <span className={`status-dot dot--${inv.status ?? 'uploaded'}`} />
-                      {formatSize(inv.size)} · {formatDate(inv.uploadedAt)}
-                    </span>
-                  </button>
-                </li>
-              ))}
-            </ul>
-          )}
-        </section>
-
-        {/* ── Preview Panel ── */}
-        <section className="panel">
-          <div className="preview-header">
-            <div className="preview-file-info">
-              <p className="panel-title" style={{ margin: 0 }}>Document Viewer</p>
-              {activeInvoice && (
-                <>
-                  <div className="preview-filename">{activeInvoice.originalName}</div>
-                  <div className="preview-filesize">{formatSize(activeInvoice.size)}</div>
-                </>
-              )}
-            </div>
-
-            {activeInvoice && (
-              <div className="preview-actions">
-                <button
-                  type="button"
-                  className={`extract-btn${isExtracting ? ' extracting' : ''}`}
-                  onClick={handleExtract}
-                  disabled={isExtracting}
-                >
-                  {isExtracting
-                    ? <><span className="pulse-dot" />Extracting…</>
-                    : '⚡ Extract Fields'
-                  }
-                </button>
-                <button type="button" className="export-btn" title="Export CSV"
-                  onClick={() => window.open(`/api/invoices/${activeInvoice.id}/export/csv`, '_blank')}>📄 CSV</button>
-                <button type="button" className="export-btn" title="Export Excel"
-                  onClick={() => window.open(`/api/invoices/${activeInvoice.id}/export/excel`, '_blank')}>📊 Excel</button>
-                <a className="open-link" href={activeInvoice.previewUrl}
-                  target="_blank" rel="noreferrer">↗ Open</a>
-              </div>
-            )}
-          </div>
-
-          <div className="preview-surface">{renderPreview()}</div>
-        </section>
-
-        {/* ── Extracted Fields Panel ── */}
-        {(extractedFields || extractError) && (
-          <section className="panel fields-panel">
-            <div className="fields-top">
-              <h2>Extracted Fields</h2>
-              {workflowStatus && (
-                <span className={`workflow-badge workflow-badge--${workflowStatus.replace(/_/g, '-')}`}>
-                  {workflowStatus.replace(/_/g, ' ')}
-                </span>
-              )}
-            </div>
-
-            {extractError ? (
-              <div className="toast toast--error">✕ {extractError}</div>
-            ) : (
-              <>
-                {/* Key fields */}
-                <dl className="fields-grid">
-                  {Object.entries(FIELD_LABELS).map(([key, label]) => {
-                    const val = extractedFields[key]
-                    if (val == null || val === '') return null
-                    const isAmt = AMOUNT_KEYS.has(key)
-                    return (
-                      <div key={key} className={`field-card${isAmt ? ' field--amount' : ''}`}>
-                        <dt>{label}</dt>
-                        <dd>{typeof val === 'number' ? val.toFixed(2) : val}</dd>
-                      </div>
-                    )
-                  })}
-                </dl>
-
-                {/* Line items */}
-                {extractedFields.items?.length > 0 && (
-                  <div className="items-section">
-                    <p className="section-subtitle">Line Items</p>
-                    <table className="items-table">
-                      <thead>
-                        <tr>
-                          <th>Description</th>
-                          <th>Qty</th>
-                          <th>Unit Price</th>
-                          <th>Amount</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {extractedFields.items.map((item, i) => (
-                          <tr key={i}>
-                            <td>{item.description}</td>
-                            <td>{item.quantity ?? '—'}</td>
-                            <td>{item.unit_price != null ? item.unit_price.toFixed(2) : '—'}</td>
-                            <td>{item.amount != null ? item.amount.toFixed(2) : '—'}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                )}
-
-                {/* Validation */}
-                {validationResult && (
-                  <div className="validation-section">
-                    <div className="validation-header">
-                      <h3>Validation</h3>
-                      <span className={`validation-pill validation-pill--${validationResult.is_valid ? 'pass' : 'fail'}`}>
-                        {validationResult.is_valid ? '✓ Passed' : '✕ Failed'}
-                      </span>
-                    </div>
-
-                    <div className="validation-checks">
-                      {Object.entries(VALIDATION_LABELS).map(([key, label]) => (
-                        <div key={key} className={`validation-check check--${validationResult[key] ? 'pass' : 'fail'}`}>
-                          <span className="check-icon">{validationResult[key] ? '✓' : '✗'}</span>
-                          <span>{label}</span>
-                        </div>
-                      ))}
-                    </div>
-
-                    {validationResult.errors?.length > 0 && (
-                      <ul className="validation-errors">
-                        {validationResult.errors.map((e, i) => <li key={i}>{e}</li>)}
-                      </ul>
-                    )}
-                  </div>
-                )}
-
-                {/* Raw text */}
-                {extractedFields.raw_text && (
-                  <details className="raw-text-details">
-                    <summary>Raw OCR text</summary>
-                    <pre className="raw-text">{extractedFields.raw_text}</pre>
-                  </details>
-                )}
-              </>
-            )}
-          </section>
-        )}
+        <div className="max-[1280px]:col-span-1 max-[1280px]:order-2">
+          <PreviewPanel
+            activeInvoice={activeInvoice}
+            extractedFields={extractedFields}
+            validationResult={validationResult}
+            workflowStatus={workflowStatus}
+            isExtracting={isExtracting}
+            onExtract={handleExtract}
+            onExportCsv={() => activeInvoice && downloadFile(`/api/invoices/${activeInvoice.id}/export/csv`, `invoice_${activeInvoice.id}.csv`)}
+            onExportExcel={() => activeInvoice && downloadFile(`/api/invoices/${activeInvoice.id}/export/excel`, `invoice_${activeInvoice.id}.xlsx`)}
+            decision={reviewDecision}
+            decisionReason={decisionReason}
+            onDecisionReasonChange={setDecisionReason}
+            onApprove={handleApprove}
+            onReject={handleReject}
+            isSavingDecision={isSavingDecision}
+            decisionError={decisionError}
+            decisionMessage={decisionMessage}
+          />
+        </div>
       </div>
+      {extractError && <div className="px-3.5 py-2.5 rounded-[10px] text-[0.82rem] bg-red-dim text-red border border-red/30">x {extractError}</div>}
     </main>
   )
 }

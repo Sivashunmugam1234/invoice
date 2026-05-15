@@ -10,3 +10,19 @@ numpy>=1.26.4
 spacy>=3.7.0
 pymysql>=1.1.0
 openpyxl>=3.1.0
+
+# NOTE: pytesseract is a Python wrapper for Tesseract-OCR
+# You must install the Tesseract-OCR binary separately on your system:
+#
+# Windows:
+#   Download and run installer from: https://github.com/UB-Mannheim/tesseract/wiki
+#   Default path: C:\Program Files\Tesseract-OCR\tesseract.exe
+#
+# macOS:
+#   brew install tesseract
+#
+# Linux (Ubuntu/Debian):
+#   sudo apt-get install tesseract-ocr
+#
+# After installation, restart the backend server.
+# The system will auto-detect Tesseract in PATH or common installation locations.
