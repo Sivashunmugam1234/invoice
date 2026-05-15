@@ -47,8 +47,8 @@ export default function PreviewPanel({
           >
             {isExtracting ? 'Refreshing...' : 'Re-Extract'}
           </button>
-          <button type="button" className="px-3.5 py-1.5 border border-border-hi rounded-lg bg-transparent text-text-2 font-body text-[0.78rem] font-medium cursor-pointer transition-all whitespace-nowrap hover:border-gold hover:text-gold hover:bg-gold-dim hover:-translate-y-px" title="Export all invoices to CSV" onClick={onExportCsv}>CSV</button>
-          <button type="button" className="px-3.5 py-1.5 border border-border-hi rounded-lg bg-transparent text-text-2 font-body text-[0.78rem] font-medium cursor-pointer transition-all whitespace-nowrap hover:border-gold hover:text-gold hover:bg-gold-dim hover:-translate-y-px" title="Export all invoices to Excel" onClick={onExportExcel}>Excel</button>
+          <button type="button" className="px-3.5 py-1.5 border border-border-hi rounded-lg bg-transparent text-text-2 font-body text-[0.78rem] font-medium cursor-pointer transition-all whitespace-nowrap hover:border-gold hover:text-gold hover:bg-gold-dim hover:-translate-y-px" title="Export this invoice to CSV" onClick={onExportCsv}>CSV</button>
+          <button type="button" className="px-3.5 py-1.5 border border-border-hi rounded-lg bg-transparent text-text-2 font-body text-[0.78rem] font-medium cursor-pointer transition-all whitespace-nowrap hover:border-gold hover:text-gold hover:bg-gold-dim hover:-translate-y-px" title="Export this invoice to Excel" onClick={onExportExcel}>Excel</button>
         </div>
       </div>
 

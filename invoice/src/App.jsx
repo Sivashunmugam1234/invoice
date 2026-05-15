@@ -399,8 +399,6 @@ export default function App() {
         authUser={authUser}
         invoicesCount={invoices.length}
         storedCount={reviewedCount}
-        onDownloadAllCsv={() => downloadFile('/api/export/csv', 'all_invoices.csv')}
-        onDownloadAllExcel={() => downloadFile('/api/export/excel', 'all_invoices.xlsx')}
         onLogout={handleLogout}
       />
 
@@ -466,8 +464,8 @@ export default function App() {
             workflowStatus={workflowStatus}
             isExtracting={isExtracting}
             onExtract={handleExtract}
-            onExportCsv={() => downloadFile('/api/export/csv', 'all_invoices.csv')}
-            onExportExcel={() => downloadFile('/api/export/excel', 'all_invoices.xlsx')}
+            onExportCsv={() => activeInvoice && downloadFile(`/api/invoices/${activeInvoice.id}/export/csv`, `invoice_${activeInvoice.id}.csv`)}
+            onExportExcel={() => activeInvoice && downloadFile(`/api/invoices/${activeInvoice.id}/export/excel`, `invoice_${activeInvoice.id}.xlsx`)}
             decision={reviewDecision}
             decisionReason={decisionReason}
             onDecisionReasonChange={setDecisionReason}
